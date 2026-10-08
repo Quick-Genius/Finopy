@@ -1,0 +1,19 @@
+== BEFORE
+i-65bd06946579204c5 payments-batch-dev-1 running finops_mark= None
+i-bfd9da3ea4310817f payments-batch-dev-2 running finops_mark= None
+i-88d7e66e0bda3396e payments-dr-standby running finops_mark= None
+i-d54b1328207a43734 payments-shared-ingest running finops_mark= None
+i-9eff94431eba34950 payments-api-1 running finops_mark= None
+i-24b190f40f396f0fb analytics-etl-1 running finops_mark= None
+== custodian run (real, non-dry) exit code follows
+2026-10-08 12:39:22,849: custodian.policy:INFO policy:case_payments_batch-dev-idle-ec2-v1 resource:aws.ec2 region:us-east-1 count:2 time:0.25
+2026-10-08 12:39:22,851: custodian.actions:INFO Tagging 2 resources for stop on 2026/10/10
+2026-10-08 12:39:22,861: custodian.policy:INFO policy:case_payments_batch-dev-idle-ec2-v1 action:tagdelayedaction resources:2 execution_time:0.01
+exit=
+== AFTER
+i-65bd06946579204c5 payments-batch-dev-1 running finops_mark= Resource does not meet policy: stop@2026/10/10
+i-bfd9da3ea4310817f payments-batch-dev-2 running finops_mark= Resource does not meet policy: stop@2026/10/10
+i-88d7e66e0bda3396e payments-dr-standby running finops_mark= None
+i-d54b1328207a43734 payments-shared-ingest running finops_mark= None
+i-9eff94431eba34950 payments-api-1 running finops_mark= None
+i-24b190f40f396f0fb analytics-etl-1 running finops_mark= None

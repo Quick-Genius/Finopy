@@ -1,0 +1,411 @@
+{
+  "id": "sentinelIntake0001",
+  "name": "Sentinel case intake",
+  "nodes": [
+    {
+      "id": "sentinelIntake0001-0",
+      "name": "Case event",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sentinel-case",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "webhookId": "sentinel-case"
+    },
+    {
+      "id": "sentinelIntake0001-1",
+      "name": "Verify signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        0
+      ],
+      "parameters": {
+        "jsCode": "\n// Verify HMAC over the RAW body + timestamp window, then dedupe by event_id. Never throws: returns a verdict.\nconst crypto = require('crypto');\nconst it = $input.first();\nconst h = it.json.headers || {};\nconst out = (o) => [{ json: o }];\nconst b64 = it.binary && it.binary.data ? it.binary.data.data : null;\nif (!b64) return out({ valid: false, reason: 'no raw body' });\nconst raw = Buffer.from(b64, 'base64');\nconst ts = h['x-sentinel-timestamp'];\nconst sig = h['x-sentinel-signature'] || '';\nif (!ts || !(Math.abs(Date.now() / 1000 - Number(ts)) <= 300)) return out({ valid: false, reason: 'stale or missing timestamp' });\nconst want = crypto.createHmac('sha256', $env.SENTINEL_HMAC_SECRET).update(ts + '.').update(raw).digest('hex');\nconst a = Buffer.from(want), b = Buffer.from(sig);\nif (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return out({ valid: false, reason: 'bad signature' });\nconst event = JSON.parse(raw.toString('utf8'));\nconst seen = $getWorkflowStaticData('global').seen || {};\nreturn out({ valid: true, duplicate: !!seen[event.event_id], event });\n"
+      }
+    },
+    {
+      "id": "sentinelIntake0001-2",
+      "name": "Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        400,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "sentinelIntake0001-3",
+      "name": "Respond 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        600,
+        140
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: $json.reason }) }}",
+        "options": {
+          "responseCode": 401
+        }
+      }
+    },
+    {
+      "id": "sentinelIntake0001-4",
+      "name": "Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        600,
+        -60
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.duplicate }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "sentinelIntake0001-5",
+      "name": "Respond duplicate",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        800,
+        -140
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ duplicate: true }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "sentinelIntake0001-6",
+      "name": "Fetch case",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        800,
+        40
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SENTINEL_API }}/cases/{{ $node['Verify signature'].json.event.case_id }}",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "neverError": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "sentinelIntake0001-7",
+      "name": "Route = dry_run?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1000,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.content.recommendation.route === 'dry_run' && $json.state === 'INVESTIGATED' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "sentinelIntake0001-8",
+      "name": "Start dry-run (API)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        -20
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SENTINEL_API }}/cases/{{ $node['Verify signature'].json.event.case_id }}/dry-run",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "sentinelIntake0001-9",
+      "name": "Finish",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        -20
+      ],
+      "parameters": {
+        "jsCode": "\nconst r = $input.first().json;\nif (r.statusCode >= 500) throw new Error('dry-run failed with ' + r.statusCode + ': the outbox will retry this event');\n\n// Record the event as handled only AFTER success, so a failed delivery is retried by the outbox, not swallowed.\nconst sd = $getWorkflowStaticData('global');\nsd.seen = sd.seen || {};\nconst ev = $('Verify signature').first().json.event;\nsd.seen[ev.event_id] = Date.now();\nconst ks = Object.keys(sd.seen);\nif (ks.length > 500) ks.sort((x, y) => sd.seen[x] - sd.seen[y]).slice(0, ks.length - 500).forEach((k) => delete sd.seen[k]);\nreturn [{ json: { handled: true, event_id: ev.event_id, ...( $input.first() ? { upstream: $input.first().json.statusCode ?? null } : {}) } }];\n"
+      }
+    },
+    {
+      "id": "sentinelIntake0001-10",
+      "name": "Digest only (no action)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        120
+      ],
+      "parameters": {
+        "jsCode": "\n// Record the event as handled only AFTER success, so a failed delivery is retried by the outbox, not swallowed.\nconst sd = $getWorkflowStaticData('global');\nsd.seen = sd.seen || {};\nconst ev = $('Verify signature').first().json.event;\nsd.seen[ev.event_id] = Date.now();\nconst ks = Object.keys(sd.seen);\nif (ks.length > 500) ks.sort((x, y) => sd.seen[x] - sd.seen[y]).slice(0, ks.length - 500).forEach((k) => delete sd.seen[k]);\nreturn [{ json: { handled: true, event_id: ev.event_id, ...( $input.first() ? { upstream: $input.first().json.statusCode ?? null } : {}) } }];\n"
+      }
+    },
+    {
+      "id": "sentinelIntake0001-11",
+      "name": "Respond 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1600,
+        40
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, handled: $json.handled }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Case event": {
+      "main": [
+        [
+          {
+            "node": "Verify signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify signature": {
+      "main": [
+        [
+          {
+            "node": "Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid?": {
+      "main": [
+        [
+          {
+            "node": "Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Duplicate?": {
+      "main": [
+        [
+          {
+            "node": "Respond duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch case",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch case": {
+      "main": [
+        [
+          {
+            "node": "Route = dry_run?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route = dry_run?": {
+      "main": [
+        [
+          {
+            "node": "Start dry-run (API)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Digest only (no action)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start dry-run (API)": {
+      "main": [
+        [
+          {
+            "node": "Finish",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finish": {
+      "main": [
+        [
+          {
+            "node": "Respond 200",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Digest only (no action)": {
+      "main": [
+        [
+          {
+            "node": "Respond 200",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "versionId": "sentinelIntake0001-v1"
+}

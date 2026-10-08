@@ -1,0 +1,588 @@
+{
+  "id": "sentinelApproval001",
+  "name": "Sentinel approval",
+  "nodes": [
+    {
+      "id": "sentinelApproval001-0",
+      "name": "Approval requested",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sentinel-approval",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "webhookId": "sentinel-approval"
+    },
+    {
+      "id": "sentinelApproval001-1",
+      "name": "Verify signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        0
+      ],
+      "parameters": {
+        "jsCode": "\n// Verify HMAC over the RAW body + timestamp window, then dedupe by event_id. Never throws: returns a verdict.\nconst crypto = require('crypto');\nconst it = $input.first();\nconst h = it.json.headers || {};\nconst out = (o) => [{ json: o }];\nconst b64 = it.binary && it.binary.data ? it.binary.data.data : null;\nif (!b64) return out({ valid: false, reason: 'no raw body' });\nconst raw = Buffer.from(b64, 'base64');\nconst ts = h['x-sentinel-timestamp'];\nconst sig = h['x-sentinel-signature'] || '';\nif (!ts || !(Math.abs(Date.now() / 1000 - Number(ts)) <= 300)) return out({ valid: false, reason: 'stale or missing timestamp' });\nconst want = crypto.createHmac('sha256', $env.SENTINEL_HMAC_SECRET).update(ts + '.').update(raw).digest('hex');\nconst a = Buffer.from(want), b = Buffer.from(sig);\nif (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return out({ valid: false, reason: 'bad signature' });\nconst event = JSON.parse(raw.toString('utf8'));\nconst seen = $getWorkflowStaticData('global').seen || {};\nreturn out({ valid: true, duplicate: !!seen[event.event_id], event });\n"
+      }
+    },
+    {
+      "id": "sentinelApproval001-2",
+      "name": "Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        400,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "sentinelApproval001-3",
+      "name": "Respond 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        600,
+        140
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: $json.reason }) }}",
+        "options": {
+          "responseCode": 401
+        }
+      }
+    },
+    {
+      "id": "sentinelApproval001-4",
+      "name": "Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        600,
+        -60
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.duplicate }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "sentinelApproval001-5",
+      "name": "Respond duplicate",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        800,
+        -140
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ duplicate: true }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "sentinelApproval001-6",
+      "name": "Mark seen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        40
+      ],
+      "parameters": {
+        "jsCode": "\n// Record the event as handled only AFTER success, so a failed delivery is retried by the outbox, not swallowed.\nconst sd = $getWorkflowStaticData('global');\nsd.seen = sd.seen || {};\nconst ev = $('Verify signature').first().json.event;\nsd.seen[ev.event_id] = Date.now();\nconst ks = Object.keys(sd.seen);\nif (ks.length > 500) ks.sort((x, y) => sd.seen[x] - sd.seen[y]).slice(0, ks.length - 500).forEach((k) => delete sd.seen[k]);\nreturn [{ json: { handled: true, event_id: ev.event_id, ...( $input.first() ? { upstream: $input.first().json.statusCode ?? null } : {}) } }];\n"
+      }
+    },
+    {
+      "id": "sentinelApproval001-7",
+      "name": "Respond accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1000,
+        40
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ accepted: true }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "sentinelApproval001-8",
+      "name": "Get approval packet",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        40
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SENTINEL_API }}/approvals/{{ $node['Verify signature'].json.event.approval_id }}",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "neverError": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "sentinelApproval001-9",
+      "name": "Publish form URL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        40
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SENTINEL_API }}/approvals/{{ $json.approval_id }}/form-url",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ form_url: $execution.resumeFormUrl }) }}"
+      }
+    },
+    {
+      "id": "sentinelApproval001-10",
+      "name": "Build form",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        40
+      ],
+      "parameters": {
+        "jsCode": "\n// Everything shown comes from the API's own record of the approval; values are HTML-escaped.\nconst p = $('Get approval packet').first().json;\nconst e = (s) => String(s ?? '').replace(/[&<>\"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[c]));\nconst err = $json.lastError ? `<p style=\"color:#b3261e\"><b>Previous attempt refused:</b> ${e($json.lastError)}</p>` : '';\nconst rows = [\n  ['Tenant', p.tenant_id], ['Accountable owner', `${p.owner} (confidence ${p.attribution_confidence})`], ['Action', `${p.action} via template ${p.template}`],\n  ['Exact targets (' + p.target_count + ')', p.targets.map((t) => `${t.id}${t.name ? ' (' + t.name + ')' : ''}`).join(', ')],\n  ['Excluded', (p.excluded || []).map((x) => `${x.resource_id}: ${x.reason}`).join('; ') || 'none'],\n  ['Projected saving', `${p.projected_savings.monthly} ${p.projected_savings.currency}/month (projected, not realized)`],\n  ['Assumptions', (p.projected_savings.assumptions || []).join('; ')], ['Risk', p.risk], ['Rollback', p.rollback], ['Why', (p.why || []).join('; ')],\n  ['Policy sha256', p.policy_sha256], ['Target-set sha256', p.target_set_sha256], ['Case / version', `${p.case_id} / v${p.case_version}`], ['Expires (UTC)', p.expires_at],\n];\nconst html = err + '<table style=\"text-align:left;font-size:13px\">' + rows.map(([k, v]) => `<tr><th style=\"padding-right:12px;vertical-align:top\">${e(k)}</th><td style=\"word-break:break-all\">${e(v)}</td></tr>`).join('') + '</table>' +\n  '<p>Your decision is checked by the Sentinel API against its own copy of these values. The form cannot change targets, policy or tenant.</p>';\nreturn [{ json: { formHtml: html } }];\n"
+      }
+    },
+    {
+      "id": "sentinelApproval001-11",
+      "name": "Wait for approver",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1800,
+        40
+      ],
+      "parameters": {
+        "resume": "form",
+        "formTitle": "Sentinel approval",
+        "formDescription": "={{ $json.formHtml }}",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Approver ID",
+              "fieldType": "text",
+              "requiredField": true,
+              "placeholder": "e.g. payments-approver"
+            },
+            {
+              "fieldLabel": "Approver PIN",
+              "fieldType": "password",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Decision",
+              "fieldType": "dropdown",
+              "requiredField": true,
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "approve"
+                  },
+                  {
+                    "option": "reject"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Note",
+              "fieldType": "textarea"
+            }
+          ]
+        },
+        "limitWaitTime": true,
+        "limitType": "atSpecifiedTime",
+        "maxDateAndTime": "={{ new Date(new Date($node['Get approval packet'].json.expires_at).getTime() + 3000).toISOString() }}",
+        "options": {}
+      },
+      "webhookId": "sentinel-approval-form"
+    },
+    {
+      "id": "sentinelApproval001-12",
+      "name": "Build signed callback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        40
+      ],
+      "parameters": {
+        "jsCode": "\n// Signs EXACTLY the bytes that the next node sends. The body carries only identifiers and the values the approver saw.\nconst crypto = require('crypto');\nconst p = $('Get approval packet').first().json;\nconst f = $input.first().json;\nconst decided = !!f['Decision'];                       // a timed-out wait resumes with no form data\nconst body = {\n  approval_id: p.approval_id, case_id: p.case_id, decision: decided ? f['Decision'] : 'timeout',\n  actor_id: decided ? String(f['Approver ID']).trim() : 'system:n8n-timeout', actor_proof: decided ? String(f['Approver PIN']) : null,\n  case_version: p.case_version, policy_sha256: p.policy_sha256, target_set_sha256: p.target_set_sha256, expires_at: p.expires_at,\n  idempotency_key: [p.approval_id, decided ? f['Decision'] : 'timeout', decided ? String(f['Approver ID']).trim() : 'timeout'].join(':'),\n};\nconst raw = JSON.stringify(body);\nconst ts = String(Math.floor(Date.now() / 1000));\nconst sig = crypto.createHmac('sha256', $env.SENTINEL_HMAC_SECRET).update(ts + '.').update(raw).digest('hex');\nreturn [{ json: { raw, ts, sig } }];\n"
+      }
+    },
+    {
+      "id": "sentinelApproval001-13",
+      "name": "Callback /approve (API)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        40
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SENTINEL_API }}/approve",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
+            },
+            {
+              "name": "x-sentinel-timestamp",
+              "value": "={{ $json.ts }}"
+            },
+            {
+              "name": "x-sentinel-signature",
+              "value": "={{ $json.sig }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.raw }}"
+      }
+    },
+    {
+      "id": "sentinelApproval001-14",
+      "name": "Refused (identity)?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2400,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.statusCode === 403 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "sentinelApproval001-15",
+      "name": "Remember refusal",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2600,
+        0
+      ],
+      "parameters": {
+        "jsCode": "return [{ json: { lastError: ($input.first().json.body && $input.first().json.body.error) || 'refused' } }];"
+      }
+    }
+  ],
+  "connections": {
+    "Approval requested": {
+      "main": [
+        [
+          {
+            "node": "Verify signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify signature": {
+      "main": [
+        [
+          {
+            "node": "Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid?": {
+      "main": [
+        [
+          {
+            "node": "Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Duplicate?": {
+      "main": [
+        [
+          {
+            "node": "Respond duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark seen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark seen": {
+      "main": [
+        [
+          {
+            "node": "Respond accepted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond accepted": {
+      "main": [
+        [
+          {
+            "node": "Get approval packet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get approval packet": {
+      "main": [
+        [
+          {
+            "node": "Publish form URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish form URL": {
+      "main": [
+        [
+          {
+            "node": "Build form",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build form": {
+      "main": [
+        [
+          {
+            "node": "Wait for approver",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for approver": {
+      "main": [
+        [
+          {
+            "node": "Build signed callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build signed callback": {
+      "main": [
+        [
+          {
+            "node": "Callback /approve (API)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Callback /approve (API)": {
+      "main": [
+        [
+          {
+            "node": "Refused (identity)?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Refused (identity)?": {
+      "main": [
+        [
+          {
+            "node": "Remember refusal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remember refusal": {
+      "main": [
+        [
+          {
+            "node": "Build form",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "versionId": "sentinelApproval001-v1"
+}

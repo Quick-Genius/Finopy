@@ -1,0 +1,174 @@
+name: finops-sentinel
+
+# Demo-only: every cloud credential below is a dummy and every endpoint is LocalStack. No real cloud is reachable.
+x-aws-dummy: &aws-dummy
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_ENDPOINT_URL: http://localstack:4566
+
+x-api-env: &api-env          # the running API gets ONLY the RLS-bound app role, never the owner URL
+  DATABASE_URL: postgresql://sentinel_app:${APP_DB_PASSWORD}@postgres:5432/sentinel
+  N8N_HMAC_SECRET: ${N8N_HMAC_SECRET}
+  RUNNER_HMAC_SECRET: ${RUNNER_HMAC_SECRET}
+
+services:
+  postgres:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: sentinel
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      CQ_DB_PASSWORD: ${CQ_DB_PASSWORD}
+      N8N_DB_PASSWORD: ${N8N_DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    ports: ["127.0.0.1:5433:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinel"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  localstack:
+    image: localstack/localstack:4.14.0   # 2026.09.x requires an auth token; 4.14.0 runs anonymously
+    environment:
+      SERVICES: ec2,sts,cloudwatch,iam
+      DEBUG: "0"
+    ports: ["127.0.0.1:4566:4566"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  migrate:
+    build: {context: ., dockerfile: api/Dockerfile}
+    command: ["python", "-m", "app.migrate"]
+    environment:
+      <<: *api-env
+      OWNER_DATABASE_URL: postgresql://sentinel:${POSTGRES_PASSWORD}@postgres:5432/sentinel
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: "no"
+
+  seed:
+    build: {context: ., dockerfile: seed/Dockerfile}
+    environment:
+      <<: *aws-dummy
+      OWNER_DATABASE_URL: postgresql://sentinel:${POSTGRES_PASSWORD}@postgres:5432/sentinel
+      N8N_API_TOKEN: ${N8N_API_TOKEN}
+      SEED_TODAY: ${SEED_TODAY:-}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      localstack: {condition: service_healthy}
+    restart: "no"
+
+  runner:                       # the ONLY container with (dummy) action credentials
+    build: {context: ., dockerfile: runner/Dockerfile}
+    environment:
+      <<: *aws-dummy
+      RUNNER_HMAC_SECRET: ${RUNNER_HMAC_SECRET}
+    volumes: [runner_state:/data]
+    depends_on:
+      localstack: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8080/health',timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  cq-runner:                    # read-only inventory sync; no Custodian, no action role
+    build: {context: ., dockerfile: cq/Dockerfile}
+    working_dir: /home/cq
+    environment:
+      <<: *aws-dummy
+      CQ_RUNNER_TOKEN: ${CQ_RUNNER_TOKEN}
+      CQ_AWS_VERSION: ${CQ_AWS_VERSION}
+      CQ_PG_VERSION: ${CQ_PG_VERSION}
+      CQ_PG_DSN: postgresql://cloudquery:${CQ_DB_PASSWORD}@postgres:5432/sentinel?sslmode=disable&search_path=inventory_raw
+      CLOUDQUERY_API_KEY: ${CLOUDQUERY_API_KEY:-}
+    volumes: [cq_cache:/home/cq/.cq]
+    depends_on:
+      postgres: {condition: service_healthy}
+      localstack: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8080/health',timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:                          # no AWS variables at all: it cannot call a cloud API
+    build: {context: ., dockerfile: api/Dockerfile}
+    environment:
+      <<: *api-env
+      N8N_WEBHOOK_BASE: http://n8n:5678/webhook
+      N8N_FORM_BASE: http://localhost:5678
+      RUNNER_URL: http://runner:8080
+      DEMO_MODE: "true"
+      RESOURCE_MIN_AGE_DAYS: "0"        # LocalStack cannot back-date launch times
+      APPROVAL_TTL_SECONDS: ${APPROVAL_TTL_SECONDS:-1800}
+      SNAPSHOT_MAX_AGE_SECONDS: ${SNAPSHOT_MAX_AGE_SECONDS:-3600}
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      runner: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health',timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  n8n:
+    image: n8nio/n8n:1.123.84
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: n8n
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_HOST: localhost
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: http://localhost:5678/
+      GENERIC_TIMEZONE: UTC
+      TZ: UTC
+      NODE_FUNCTION_ALLOW_BUILTIN: crypto
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      SENTINEL_API: http://api:8000
+      SENTINEL_N8N_TOKEN: ${N8N_API_TOKEN}
+      SENTINEL_HMAC_SECRET: ${N8N_HMAC_SECRET}
+      SENTINEL_CQ_URL: http://cq-runner:8080
+      SENTINEL_CQ_TOKEN: ${CQ_RUNNER_TOKEN}
+      SENTINEL_RUN_NOW_SECRET: ${RUN_NOW_SECRET}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n/workflows:/workflows:ro
+      - ./n8n/entrypoint.sh:/entrypoint.sh:ro
+    ports: ["127.0.0.1:5678:5678"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5678/healthz || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+
+  dashboard:
+    build: {context: dashboard}
+    ports: ["127.0.0.1:3000:80"]
+    depends_on:
+      api: {condition: service_healthy}
+
+volumes:
+  pgdata:
+  n8n_data:
+  runner_state:
+  cq_cache:

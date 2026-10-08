@@ -1,0 +1,5 @@
+c7n==0.9.53
+boto3>=1.35,<2
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+pyyaml>=6,<7

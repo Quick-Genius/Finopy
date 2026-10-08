@@ -1,0 +1,29 @@
+# CloudQuery inventory sync: LocalStack AWS -> PostgreSQL schema inventory_raw.
+# Smallest table set the demo needs. CloudQuery never remediates and never writes agent fields.
+kind: source
+spec:
+  name: aws
+  path: cloudquery/aws
+  registry: cloudquery
+  version: "${CQ_AWS_VERSION}"
+  tables:
+    - aws_ec2_instances
+    - aws_ec2_ebs_volumes
+  skip_dependent_tables: true
+  destinations: [postgresql]
+  spec:
+    regions: [us-east-1]
+    custom_endpoint_url: "http://localstack:4566"
+    custom_endpoint_hostname_immutable: true
+    custom_endpoint_partition_id: aws
+    custom_endpoint_signing_region: us-east-1
+    concurrency: 200
+---
+kind: destination
+spec:
+  name: postgresql
+  path: /usr/local/bin/cq-destination-postgresql   # built from source in cq/Dockerfile (hub download needs a login)
+  registry: local
+  write_mode: overwrite-delete-stale
+  spec:
+    connection_string: "${CQ_PG_DSN}"

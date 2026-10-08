@@ -1,0 +1,37 @@
+$ docker compose exec cq-runner  POST /sync   (n8n calls this same endpoint)
+{
+ "sync_id": "55fc7ecaf9f5",
+ "started_at": "2026-10-08T13:19:22.732369+00:00",
+ "finished_at": "2026-10-08T13:19:28.172424+00:00",
+ "exit_code": 0,
+ "plugin_versions": {
+  "aws": "v22.19.2",
+  "postgresql": "v8.17.0-source-build",
+  "cli": "6.45.0"
+ }
+}
+2026-10-08T13:19:28Z INF Sync summary duration=1s errors=0 invocation_id=15a2c6cb-174e-4069-b0f9-fbecf1a774a0 module=cli resources=13 result="Sync completed successfully" warnings=0
+2026-10-08T13:19:28Z INF End sync destinations=["postgresql (local@/usr/local/bin/cq-destination-postgresql)"] invocation_id=15a2c6cb-174e-4069-b0f9-fbecf1a774a0 module=cli source="aws (cloudquery/aws@v22.19.2)" sync_time=2026-10-08T13:19:26Z transformers=[]
+
+$ psql: rows CloudQuery wrote to PostgreSQL (schema inventory_raw)
+     instance_id     |  state  |          name          |  tenant   | protected 
+---------------------+---------+------------------------+-----------+-----------
+ i-fa3971e7ab8d2ac75 | running | analytics-etl-1        | analytics | 
+ i-43e007e79d0deffac | running | payments-api-1         | payments  | 
+ i-58e54066f20b8910f | running | payments-batch-dev-1   | payments  | 
+ i-4763d6ca7eb05df99 | running | payments-batch-dev-2   | payments  | 
+ i-73b80ec054789fd4d | running | payments-dr-standby    | payments  | true
+ i-86b926f3138454518 | running | payments-shared-ingest | payments  | 
+(6 rows)
+
+       volume_id       |   state   | attachments |  tenant   
+-----------------------+-----------+-------------+-----------
+ vol-712be2ccda06025f8 | available |           0 | analytics
+ vol-2904fb862bc30f0ac | in-use    |           1 | 
+ vol-dee94e5f4feec4e51 | in-use    |           1 | 
+ vol-bb193eec83d676ce3 | in-use    |           1 | 
+ vol-ca925ef137a8d7028 | in-use    |           1 | 
+ vol-701bb20b6882468da | in-use    |           1 | 
+ vol-e402d58aec05ae76c | in-use    |           1 | 
+(7 rows)
+
