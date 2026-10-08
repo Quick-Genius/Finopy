@@ -34,6 +34,7 @@ def test_faithful_summary_passes():
     (GOOD + " See https://evil.example/x", "link"),
     (GOOD + " Run `aws ec2 stop-instances`.", "code"),
     ("x" * 1300, "long"),
+    (" ".join(["word"] * 101), "over 100 words"),
     ("   ", "empty"),
 ])
 def test_anything_not_in_the_evidence_is_rejected(bad, why):
@@ -48,7 +49,7 @@ def test_packet_never_carries_secrets_or_policy_text():
 
 def test_template_summary_is_deterministic_and_passes_its_own_check():
     t = template_summary(PACKET)
-    assert t == template_summary(PACKET) and "420.0000" in t and "not measured" in t
+    assert t == template_summary(PACKET) and "$420.00" in t and "not measured" in t
     assert check_summary(t, PACKET) == []
 
 

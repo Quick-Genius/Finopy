@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ENV = dict(l.split("=", 1) for l in (ROOT / ".env").read_text().splitlines() if "=" in l and not l.startswith("#"))
+PROFILE = ENV.get("SEED_PROFILE", "problem")
 ALERT_ONLY = ENV.get("ACTION_MODE", "alert_only") != "tag_after_approval"     # the default: the system never changes anything
 API = f"http://localhost:{ENV.get('API_HOST_PORT', '8000')}"
 N8N = f"http://localhost:{ENV.get('N8N_HOST_PORT', '5678')}"
@@ -81,9 +82,20 @@ def callback(body, token=None, secret=None, ts=None):
 
 
 def submit_form(url, approver, pin, decision, note=""):
+    """POST the n8n approval form. Retries only if the form is not yet waiting (non-200 / connection error)."""
     b = uuid.uuid4().hex
     parts = "".join(f'--{b}\r\nContent-Disposition: form-data; name="field-{i}"\r\n\r\n{v}\r\n' for i, v in enumerate([approver, pin, decision, note]))
-    return http("POST", url, {"content-type": f"multipart/form-data; boundary={b}"}, (parts + f"--{b}--\r\n").encode())
+    body = (parts + f"--{b}--\r\n").encode()
+    last = (0, "")
+    for _ in range(8):
+        try:
+            last = http("POST", url, {"content-type": f"multipart/form-data; boundary={b}"}, body)
+        except Exception as ex:                       # connection reset while n8n is registering the wait
+            last = (0, str(ex))
+        if last[0] == 200:
+            return last
+        time.sleep(1.5)
+    return last
 
 
 def wait_for(fn, timeout=120, every=2):
@@ -133,8 +145,14 @@ def states(pid):
     return {c["case_id"]: c["state"] for c in get("/cases", pid)[1]}
 
 
+def case_when_listed(pid, cid):
+    """Poll the list (always 200) and fetch the case only once it exists, so waiting never produces a 404."""
+    c, lst = get("/cases", pid)
+    return case(pid, cid) if c == 200 and any(r["case_id"] == cid for r in lst) else None
+
+
 def pending_ready(pid, cid):
-    d = case(pid, cid)
+    d = case_when_listed(pid, cid)
     return d if d and d["state"] == "PENDING" and (d["approval"] or {}).get("form_url") else None
 
 
@@ -171,7 +189,7 @@ def slack_check():
     if llm.returncode == 0 and llm.stdout.strip():
         reqs = llm.stdout
         say(f"    LLM stand-in received {len(reqs.splitlines())} requests")
-        check("Slack messages carry an investigation summary written by the LLM", sum("Investigation summary" in m and "AI-written" in m for m in msgs) >= 5, f"{sum('AI-written' in m for m in msgs)} of {len(msgs)}")
+        check("Slack messages carry an investigation summary written by the LLM", sum("In short" in m and "AI-written" in m for m in msgs) >= 5, f"{sum('AI-written' in m for m in msgs)} of {len(msgs)}")
         leaked = [s for s in ("1111", "3333", "policy_yaml", "sha256", "actor_proof", ENV["N8N_HMAC_SECRET"], ENV["N8N_API_TOKEN"], ENV["RUNNER_HMAC_SECRET"]) if s in reqs]
         check("nothing secret was sent to the LLM (PINs, hashes, policy text, tokens, secrets)", not leaked, str(leaked))
     refs = [r for m in msgs for r in re.findall(r"_ref (evt_[A-Za-z0-9_]+)_", m)]
@@ -195,7 +213,7 @@ def main():
     say("== 1. trigger analysis through n8n (CloudQuery sync -> API analysis -> outbox -> n8n intake -> Custodian dry-run)")
     t0 = time.time()
     code, _ = trigger_run()
-    check("n8n manual webhook accepted", code == 202, f"HTTP {code}")
+    check("n8n manual webhook answers HTTP 200", code == 200, f"HTTP {code}")
     pay = wait_for(lambda: pending_ready("payments-analyst", "case_payments_batch-dev-idle-ec2"))
     ana = wait_for(lambda: pending_ready("analytics-analyst", "case_analytics_notebooks-unattached-ebs"))
     took = time.time() - t0
@@ -209,6 +227,8 @@ def main():
         say(f"    {k:52} {v}")
     check("expected Payments spike is DISMISSED as legitimate (not waste)", sp["case_payments_checkout-api-spend-anomaly"] == "DISMISSED")
     check("normal RDS baseline raised no case", not any("ledger" in k for k in sp))
+    check("over-budget alert raised for Payments (spend above its monthly budget), none for Analytics",
+          "case_payments_all-services-budget-overrun" in sp and not any("budget" in k for k in sa), str([k for k in {**sp, **sa} if "budget" in k]))
     check("protected production resource REFUSED before approval", sp["case_payments_dr-standby-idle-ec2"] == "REFUSED")
     check("ambiguous-owner case held as needs_review (no dry-run, no approval)", sp["case_payments_shared-ingest-idle-ec2"] == "INVESTIGATED"
           and case("payments-analyst", "case_payments_shared-ingest-idle-ec2")["policy"] is None)
@@ -358,6 +378,55 @@ def main():
         say(f"     {x['created_at'][11:23]} {x['event_type']:26} {x['from_state'] or '':12}-> {x['to_state'] or '':12} {x['actor']}")
 
 
+def healthy():
+    say("== HEALTHY PROFILE: nothing is wrong, so the only output is an 'all clear' cost digest per tenant (no cases, no recommendations)")
+    check("seed profile is healthy", PROFILE == "healthy", f"SEED_PROFILE={PROFILE} (run ./scripts/reset.sh healthy first)")
+    code, _ = trigger_run()
+    check("run-now answers HTTP 200", code == 200, f"HTTP {code}")
+    sql = lambda q: subprocess.run(["docker", "compose", "exec", "-T", "postgres", "psql", "-U", "sentinel", "-d", "sentinel", "-At", "-c", q], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    delivered = wait_for(lambda: sql("select count(*) from outbox where event_type='digest.healthy' and delivered_at is not null") == "2", 120, 3)
+    check("one 'all clear' digest per tenant was created and delivered through n8n", bool(delivered))
+    check("no cases exist for either tenant", get("/cases", "payments-analyst")[1] == [] and get("/cases", "analytics-analyst")[1] == [])
+    check("no alert, policy, approval or execution anywhere", sql("select (select count(*) from policies)+(select count(*) from approvals)+(select count(*) from executions)+(select count(*) from outbox where event_type<>'digest.healthy')") == "0")
+    check("LocalStack untouched", all(v["finops_mark"] is None and v["state"] == "running" for v in localstack_tags().values()))
+    check("every queued event was delivered (outbox empty)", sql("select count(*) from outbox where delivered_at is null") == "0")
+    r = subprocess.run(["docker", "exec", "slack-mock", "cat", "/tmp/slack.log"], capture_output=True, text=True)
+    if r.returncode == 0:
+        time.sleep(4)
+        msgs = [json.loads(l)["text"] for l in subprocess.run(["docker", "exec", "slack-mock", "cat", "/tmp/slack.log"], capture_output=True, text=True).stdout.splitlines() if l.strip()]
+        say(f"   Slack stand-in received {len(msgs)} message(s):")
+        for m in msgs:
+            say("     --- " + m.replace("\n", "\n         "))
+        check("Slack got exactly two messages: an all-clear for each tenant", len(msgs) == 2 and all("Cost check: all clear" in m for m in msgs))
+        check("the digests contain costs and a budget chart, and NO recommendations", all("budget (month)" in m and "Last 30 days" in m and "*Recommendation*" not in m and "*Issue*" not in m for m in msgs))
+        check("30-day spend is not $0.00 and is not an empty bar (regression: RLS hid rows outside the tx)", all("Last 30 days: $0.00" not in m and "30 days spent   ░" not in m for m in msgs))
+    time.sleep(2)
+
+
+def happy():
+    say("== HAPPY PATH ONLY (no negative tests): every HTTP call made by the automation should be 2xx")
+    code, _ = trigger_run()
+    check("run-now answers HTTP 200", code == 200, f"HTTP {code}")
+    pay = wait_for(lambda: pending_ready("payments-analyst", "case_payments_batch-dev-idle-ec2"))
+    ana = wait_for(lambda: pending_ready("analytics-analyst", "case_analytics_notebooks-unattached-ebs"))
+    check("both approval-ready cases reached PENDING with an n8n form", bool(pay and ana))
+    if not (pay and ana):
+        return
+    c, _ = submit_form(pay["approval"]["form_url"], "payments-approver", "1111", "approve", "happy path")
+    check("Payments approver submits the form (HTTP 200)", c == 200, f"HTTP {c}")
+    want = "APPROVED" if ALERT_ONLY else "VERIFIED"
+    done = wait_for(lambda: (lambda d: d if d and d["state"] == want else None)(case("payments-analyst", "case_payments_batch-dev-idle-ec2")), 120)
+    check(f"Payments case reached {want}", bool(done), done["state"] if done else "timeout")
+    c, _ = submit_form(ana["approval"]["form_url"], "analytics-approver", "3333", "reject", "not needed")
+    check("Analytics approver submits the form (HTTP 200)", c == 200, f"HTTP {c}")
+    rej = wait_for(lambda: (lambda d: d if d["state"] == "REJECTED" else None)(case("analytics-analyst", "case_analytics_notebooks-unattached-ebs")), 60)
+    check("Analytics case reached REJECTED", bool(rej))
+    drained = wait_for(lambda: subprocess.run(["docker", "compose", "exec", "-T", "postgres", "psql", "-U", "sentinel", "-d", "sentinel", "-At", "-c",
+                                               "select count(*) from outbox where delivered_at is null"], cwd=ROOT, capture_output=True, text=True).stdout.strip() == "0", 120, 3)
+    check("every event was delivered (outbox empty)", bool(drained))
+    time.sleep(8)           # let the last Slack posts finish before the log audit
+
+
 def expiry():
     say("== expiry: no decision => approval EXPIRED, never auto-approved (requires APPROVAL_TTL_SECONDS small)")
     trigger_run()
@@ -406,12 +475,12 @@ def outbox():
     res = subprocess.run(["docker", "compose", "exec", "-T", "postgres", "psql", "-U", "sentinel", "-d", "sentinel", "-At", "-c", q2], cwd=ROOT, capture_output=True, text=True).stdout.strip()
     say(f"   cases,policies(2 valid + 1 refused),approvals,cases-with-duplicate-policy,undelivered-events = {res}")
     cs, pol, apr, dup, undel = (int(x) for x in res.split("|"))
-    check("retries created no duplicate cases/policies/approvals; outbox fully drained", (cs, pol, apr, dup, undel) == (5, 3, 2, 0, 0), res)
+    check("retries created no duplicate cases/policies/approvals; outbox fully drained", (cs, pol, apr, dup, undel) == (6, 3, 2, 0, 0), res)
 
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
-    {"--expiry": expiry, "--outbox": outbox, "--slack-ping": slack_ping}.get(mode, main)()
+    {"--expiry": expiry, "--outbox": outbox, "--slack-ping": slack_ping, "--happy": happy, "--healthy": healthy}.get(mode, main)()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     (ROOT / "proof").mkdir(exist_ok=True)
     (ROOT / "proof" / f"e2e{mode.replace('--', '-')}-{stamp}.log").write_text("\n".join(LOG) + "\n")

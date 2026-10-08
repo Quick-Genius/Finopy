@@ -38,7 +38,8 @@ for i in $(seq 1 120); do
   curl -sf "http://localhost:${N8N_HOST_PORT}/healthz" >/dev/null 2>&1 || ok=0
   curl -sf "http://localhost:${DASHBOARD_HOST_PORT}/" >/dev/null 2>&1 || ok=0
   # n8n is healthy before its webhooks register; an unsigned POST answers 401 once the intake workflow is live
-  [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:${N8N_HOST_PORT}/webhook/sentinel-case" 2>/dev/null)" = 401 ] || ok=0
+  # n8n is "healthy" before its workflows are registered: wait until it has logged every activation (no HTTP probe, so no 401 in any log)
+  [ "$(docker compose logs n8n 2>&1 | grep -c 'Activated workflow')" -ge "$(ls n8n/workflows/*.json | wc -l | tr -d ' ')" ] || ok=0
   [ "$ok" = 1 ] && break
   echo -n "."; sleep 3
 done

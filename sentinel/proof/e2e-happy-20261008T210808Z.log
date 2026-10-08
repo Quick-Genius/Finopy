@@ -1,0 +1,8 @@
+== HAPPY PATH ONLY (no negative tests): every HTTP call made by the automation should be 2xx
+  [PASS] run-now answers HTTP 200  (HTTP 200)
+  [PASS] both approval-ready cases reached PENDING with an n8n form
+  [PASS] Payments approver submits the form (HTTP 200)  (HTTP 200)
+  [PASS] Payments case reached APPROVED  (APPROVED)
+  [PASS] Analytics approver submits the form (HTTP 200)  (HTTP 200)
+  [PASS] Analytics case reached REJECTED
+  [PASS] every event was delivered (outbox empty)

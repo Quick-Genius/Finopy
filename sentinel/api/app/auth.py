@@ -44,6 +44,10 @@ def require_roles(*roles: str):
     return dep
 
 
+ANY_ROLE = require_roles("analyst", "approver", "reviewer", "finance", "automation")
+HUMAN = require_roles("analyst", "approver", "reviewer", "finance")
+
+
 def tenant_for_case(p: Principal, case_id: str) -> str:
     """Resolve which tenant a case-addressed request runs in.
 

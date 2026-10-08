@@ -20,7 +20,7 @@ def test_idle_waste_briefing_has_all_sections_and_correct_numbers(monkeypatch):
     assert any("reversible tag" in r for r in b["recommendation"]) and any("stops them by hand" in r for r in b["recommendation"])
     assert "Nothing changes until a human decides" in b["who_acts"]
     t = b["text"]
-    for h in ("*Issue*", "*Has to be fixed*", "*Recommendation*", "*Stats*", "*Who acts:*", "the system fixes nothing by itself"):
+    for h in ("*Issue*", "*Has to be fixed*", "*Recommendation*", "*Stats*", "*Who acts:*"):
         assert h in t
 
 
@@ -49,7 +49,7 @@ def test_ambiguous_owner_asks_humans_to_fix_the_records_first():
 def test_unattached_volume_never_recommends_the_system_deleting():
     b = briefing.build(pk(kind="unattached-ebs", candidates=["vol-0123456789abcdef0"]), {"daily": [], "cpu": {}})
     t = " ".join(b["recommendation"]).lower()
-    assert "never deletes anything" in t and "by hand" in t
+    assert "the system changes nothing" in t and "delete it by hand" in t and "system deletes" not in t
 
 
 def test_resource_names_cannot_inject_slack_markup():
@@ -68,6 +68,6 @@ def test_cpu_chart_uses_a_fixed_scale_so_idle_noise_is_not_exaggerated():
 def test_default_mode_is_alert_only_and_the_briefing_promises_no_change(monkeypatch):
     monkeypatch.setattr(config, "ACTION_MODE", "alert_only")                    # the shipped default (docker-compose.yml: ${ACTION_MODE:-alert_only})
     b = briefing.build(pk(), ST); text = b["text"].lower()
-    assert "system itself changes nothing" in text and "reversible tag" not in text and "owner fixes it by hand" in b["who_acts"].lower()
+    assert "the system changes nothing" in text and "reversible tag" not in text and "owner fixes it by hand" in b["who_acts"].lower()
     done = briefing.build(pk(state="APPROVED", approval={"status": "approved", "decided_by": "payments-approver", "role": "approver", "note": None}), ST)
     assert "the system changed nothing" in done["who_acts"]

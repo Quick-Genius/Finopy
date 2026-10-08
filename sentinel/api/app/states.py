@@ -72,7 +72,10 @@ def transition(conn, tenant_id, case_id, from_state, to_state, actor, *, correla
     audit(conn, tenant_id, case_id, f"state.{to_state.lower()}", actor, from_state=from_state, to_state=to_state,
           version=row["current_version"], correlation_id=correlation_id, detail=detail)
     if to_state in NOTIFY_STATES:
+        from .tenant_settings import load, should_notify      # local import: tenant_settings itself uses audit() from here
         ver = conn.execute("select content from case_versions where case_id=%s and version=%s", (case_id, row["current_version"])).fetchone()
+        if not should_notify(load(conn, tenant_id), to_state, ((ver or {}).get("content") or {}).get("recommendation", {}).get("projected_savings", {}).get("monthly")):
+            return row["current_version"]       # this workspace muted this outcome; the audit event above is still written
         eid = "evt_" + sha256_hex(f"{case_id}|{from_state}|{to_state}|{utcnow().isoformat()}")[:20]
         payload = {"event_id": eid, "occurred_at": utcnow().isoformat(),
                    **notify_payload(tenant_id, case_id, row["current_version"], from_state, to_state, actor, ver["content"] if ver else None, detail)}

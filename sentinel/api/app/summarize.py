@@ -18,13 +18,15 @@ DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(
 NUM_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 OWNER_RE = re.compile(r"\b(?:payments|analytics)-[a-z0-9]+(?:-[a-z0-9]+)*\b")
 
-SYSTEM = """You write a short incident-investigation note for a FinOps Slack channel.
+SYSTEM = """You write the "In short" note of a FinOps alert in Slack, for a non-technical manager.
 Strict rules:
 - Use ONLY facts present in the JSON the user sends. Do not add, estimate, calculate, round or infer any number, cost, saving, date, owner, team or resource id.
-- Copy numbers, ids and owner names exactly as given. Never convert units: write confidence as the decimal given (for example 0.95, never "95%"), and never turn CPU or any value into a different unit. If something is missing, say it is not available.
-- Savings are PROJECTED, never realized (realized savings are "not measured").
-- Never approve, reject, recommend approving, or promise any action. Describe what the evidence shows and the current state only.
-- 3 to 5 short sentences, under 120 words, plain text, no markdown, no links."""
+- Copy numbers and owner names exactly as given. Never convert units (write confidence-like values as given, never as a percentage you computed). If something is missing, leave it out.
+- Savings are only ESTIMATES, never realized. Never approve, reject, recommend approving, or promise any action.
+- Write 2 or 3 short sentences, at most 60 words, in everyday words: what is happening, why it costs money, who owns it.
+- Do not list resource ids, case ids or states (the alert shows them elsewhere). No jargon: never write attribution, classified, confidence, anomaly score, evidence.
+- No opinions or filler: never write significant, concerning, worrying, likely, suggests, appears. Mention a budget only if the JSON has a budget field.
+- Plain text only: no markdown, no bullet points, no links."""
 
 
 def load_packet(tenant_id: str, case_id: str) -> dict:
@@ -51,6 +53,7 @@ def load_packet(tenant_id: str, case_id: str) -> dict:
         "risk": rec["risk"], "rollback": rec["rollback"], "policy_template": rec["template"],
         "projected_monthly": (pol or {}).get("guards", {}).get("savings", {}).get("monthly") or rec["projected_savings"]["monthly"], "currency": "USD",
         "candidate_monthly": rec["projected_savings"]["monthly"], "realized_savings": "not measured",
+        "budget": (sig.get("features") or None) if k["kind"] == "budget-overrun" else None,
         "dry_run": None if not pol else {"status": pol["status"], "custodian_exit_code": pol["dryrun_exit_code"], "targets": pol["target_ids"],
                                          "excluded": [{"id": e["resource_id"], "reason": e["reason"]} for e in pol["excluded"]], "refusal_reasons": pol["refusal_reasons"][:3]},
         "approval": None if not apr else {"status": apr["status"], "decided_by": apr["actor_id"], "role": apr["actor_role"], "note": apr["note"]},
@@ -61,25 +64,27 @@ def load_packet(tenant_id: str, case_id: str) -> dict:
 
 
 def template_summary(p: dict) -> str:
-    """Deterministic summary from the same packet: used when no LLM is configured or its output is rejected."""
-    s = [f"{p['workload']} ({p['tenant']}) is assessed as {p['classification'].replace('_', ' ')}; the case is {p['state']}."]
-    sp = p["spend"]
-    if sp["status"] == "anomaly":
-        s.append(f"Spend on {p['service']} was {sp['actual']} {sp['currency']} over the last {sp['window_days']} days against an expected {sp['expected']}.")
-    elif p["waste_indicators"]:
-        s.append("No material spend deviation; this case comes from a waste indicator.")
-    s.append(f"Owner: {p['owner']['name'] or 'not established'} (confidence {p['owner']['confidence']}); {p['owner']['reason']}.")
+    """Deterministic plain-language note from the same packet: used when no LLM is configured or its output is rejected."""
+    m = lambda x: f"${float(x):,.2f}"
+    sp, own, s = p["spend"], p["owner"], []
+    if sp["status"] == "budget_overrun" and p.get("budget"):
+        b = p["budget"]
+        s.append(f"{p['tenant']} spent {m(b['spent_30d_usd'])} in the last 30 days, {m(b['over_usd'])} over its {m(b['budget_usd'])} monthly budget.")
+        if b["top_drivers"]:
+            s.append("Fastest growth: " + ", ".join(f"{d['workload']} ({d['service']})" for d in b["top_drivers"]) + ".")
+    elif sp["status"] == "anomaly":
+        s.append(f"{p['service']} for {p['workload']} cost {m(sp['actual'])} in the last {sp['window_days']} days; about {m(sp['expected'])} was expected.")
     if p["waste_indicators"]:
-        s.append("Evidence: " + "; ".join(p["waste_indicators"][:2]) + ".")
+        s.append(p["waste_indicators"][0].rstrip(".") + ".")
+    s.append(f"Owner: {own['name']}." if own["name"] else "The owner could not be established.")
     d = p["dry_run"]
-    if d and d["targets"]:
-        s.append(f"Dry-run targets: {', '.join(d['targets'])}.")
     if d and d["refusal_reasons"]:
         s.append("Refused: " + "; ".join(d["refusal_reasons"]) + ".")
-    s.append(f"Projected saving {p['projected_monthly']} {p['currency']} per month; realized savings are not measured.")
+    if float(p["projected_monthly"] or 0) > 0:
+        s.append(f"Estimated cost: {m(p['projected_monthly'])} a month (an estimate, not measured).")
     v = p["verification"]
     if v:
-        s.append("The change was observed in the live resource state." if v["change_observed"] else "The change was NOT observed in the live resource state.")
+        s.append("The change was seen in the live resource." if v["change_observed"] else "The change was NOT seen in the live resource.")
     return " ".join(s)
 
 
@@ -98,8 +103,8 @@ def check_summary(text: str, packet: dict) -> list[str]:
     blob, problems = json.dumps(packet, default=str), []
     if not text.strip():
         return ["empty"]
-    if len(text) > 1200:
-        problems.append("too long")
+    if len(text) > 800 or len(text.split()) > 100:
+        problems.append("too long (max 100 words)")
     if re.search(r"https?://|`", text):
         problems.append("contains a link or code")
     bad_ids = set(ID_RE.findall(text)) - set(ID_RE.findall(blob))
@@ -139,6 +144,7 @@ def _alibaba(packet: dict) -> str:
     r = httpx.post((config.LLM_BASE_URL or "https://dashscope-intl.aliyuncs.com/compatible-mode/v1") + "/chat/completions", timeout=config.LLM_TIMEOUT_SECONDS,
                    headers={"Authorization": f"Bearer {config.LLM_API_KEY}"},
                    json={"model": config.LLM_MODEL or "qwen-plus", "temperature": 0, "max_tokens": 350,
+                         "enable_thinking": False,   # Qwen3.x thinks by default: ~25x tokens and ~9x slower for no benefit when only phrasing verified facts
                          "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": json.dumps(packet, default=str)}]})
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"] or ""

@@ -29,7 +29,9 @@ def load(tenant: str, snapshot_id: str, window_end: date) -> dict:
             naming[r["kind"]].append((r["pattern"], r["owner_id"]))
         naming["vpc"] = {p: o for p, o in naming.get("vpc", [])}
         events = c.execute("select * from known_events where tenant_id=%s", (tenant,)).fetchall()
-    return {"cost_facts": cost, "resources": res, "utilization": util,
+        tn = c.execute("select owner_group, policy_profile from tenants where tenant_id=%s", (tenant,)).fetchone()
+    budget = (tn["policy_profile"] or {}).get("monthly_budget_usd") if tn else None
+    return {"tenant": {"owner_group": tn["owner_group"] if tn else None, "monthly_budget_usd": budget}, "cost_facts": cost, "resources": res, "utilization": util,
             "ref": {"owners": owners, "account_map": am, "deployments": dep, "naming": dict(naming), "events": events}}
 
 
@@ -115,11 +117,17 @@ def run(tenant: str, *, snapshot_id: str, idempotency_key: str, actor: str, wind
             return {"status": "failed", "detail": "snapshot not found for tenant"}
     data = load(tenant, snapshot_id, window_end)
     drafts = build_drafts(tenant, window_end, data)
+    from . import briefing
+    digest = briefing.cost_digest(tenant) if not drafts else None       # nothing to report: just say so, with the costs
     run_id, now, created = "run_" + uuid.uuid4().hex[:12], utcnow(), []
     with tx(tenant) as c:
         for d in drafts:
             if _persist(c, tenant, d, snapshot_id, f"system:analysis:{run_id}", run_id, now):
                 created.append(d["case_id"])
+        if digest:                                                       # ONE healthy digest per tenant per day (deterministic event id)
+            eid = "evt_" + sha256_hex(f"digest|{tenant}|{window_end}")[:20]
+            c.execute("insert into outbox (event_id, tenant_id, case_id, event_type, schema_version, payload) values (%s,%s,null,'digest.healthy','1.0',%s) on conflict (event_id) do nothing",
+                      (eid, tenant, J({"event_id": eid, "event_type": "digest.healthy", "schema_version": "1.0", "tenant_id": tenant, "occurred_at": now.isoformat(), "text": digest})))
         summary = {"cases_changed": created, "drafts": len(drafts), "window": [window_start.isoformat(), window_end.isoformat()]}
         c.execute("insert into analysis_runs (run_id, tenant_id, idempotency_key, window_start, window_end, snapshot_id, status, finished_at, summary) "
                   "values (%s,%s,%s,%s,%s,%s,'completed',now(),%s)",

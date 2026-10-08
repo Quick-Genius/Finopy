@@ -45,6 +45,10 @@ def short(rid: str) -> str:
 def load_stats(tenant_id: str, p: dict) -> dict:
     end = utcnow().date()
     with tx(tenant_id) as c:
+        if p["kind"] == "budget-overrun":            # tenant-wide totals, not one workload
+            rows = c.execute("select usage_date, sum(amount) as a from cost_facts where tenant_id=%s and usage_date >= %s and usage_date < %s "
+                             "group by usage_date order by usage_date", (tenant_id, end - timedelta(days=14), end)).fetchall()
+            return {"daily": [float(r["a"]) for r in rows], "cpu": {}}
         rows = c.execute("select usage_date, sum(amount) as a from cost_facts where tenant_id=%s and workload=%s and service=%s "
                          "and usage_date >= %s and usage_date < %s group by usage_date order by usage_date",
                          (tenant_id, p["workload"], p["service"], end - timedelta(days=14), end)).fetchall()
@@ -63,7 +67,14 @@ def stats_block(p: dict, st: dict) -> str:
         L.append("cost/day (14d)".ljust(w) + spark(d) + f"  {usd(d[0])} -> {usd(d[-1])}")
         L.append(" " * w + " " * (len(d) - 3) + "^^^ analysis window")
     sp = p["spend"]
-    if sp["status"] == "anomaly":
+    if sp["status"] == "budget_overrun" and p.get("budget"):
+        spent, bud = float(p["budget"]["spent_30d_usd"]), float(p["budget"]["budget_usd"])
+        m = max(spent, bud)
+        L.append("budget (month)".ljust(w) + bar(bud, m) + f" {usd(bud)}")
+        L.append("30 days spent".ljust(w) + bar(spent, m) + f" {usd(spent)}")
+        for dr in p["budget"]["top_drivers"]:
+            L.append(f"+${float(dr['daily_increase']):.2f}/day".ljust(w) + f"{dr['workload']} ({dr['service']})")
+    elif sp["status"] == "anomaly":
         a, e = float(sp["actual"]), float(sp["expected"])
         L.append("3 days expected".ljust(w) + bar(e, max(a, e)) + f" {usd(e)}")
         L.append("3 days actual".ljust(w) + bar(a, max(a, e)) + f" {usd(a)}")
@@ -78,6 +89,18 @@ def build(p: dict, st: dict) -> dict:
     monthly = Decimal(p.get("candidate_monthly") or "0")
     protected = p["risk"] == "high" or p["state"] == "REFUSED"
     issue, fix, rec = [], [], []
+    if p["kind"] == "budget-overrun" and p.get("budget"):
+        bg = p["budget"]
+        issue.append(f"Spend over the last 30 days was {usd(bg['spent_30d_usd'])} against a monthly budget of {usd(bg['budget_usd'])} (+{bg['over_pct']}%, {usd(bg['over_usd'])} over).")
+        issue += [f"Biggest growth: *{esc(d['workload'])}* ({esc(d['service'])}) is up {usd(d['daily_increase'])}/day vs the earlier 20 days." for d in bg["top_drivers"]]
+        fix.append("Spend is running above the agreed monthly budget.")
+        rec += ["Finance and the owner review the biggest drivers above.",
+                "Decide: raise the budget (if the growth is planned) or reduce the drivers.",
+                "Other alerts for this tenant may explain part of the overage."]
+        b = {"issue": issue, "fix": fix, "recommendation": rec, "stats": stats_block(p, st),
+             "who_acts": "Finance lead and tenant owner decide. The system changes nothing."}
+        b["text"] = render(b)
+        return b
     tag_mode = config.ACTION_MODE == "tag_after_approval"
 
     if sp["status"] == "anomaly":
@@ -101,27 +124,26 @@ def build(p: dict, st: dict) -> dict:
         rec += ["Owner and platform team compare the Owner tag with the deployment record and correct whichever is wrong.",
                 "Then re-run the analysis. Until ownership is clear, no approval is possible."]
     elif p["kind"] == "unattached-ebs":
-        fix.append(f"An unused storage volume costs about {usd(monthly)}/month.")
+        fix.append(f"An unused storage volume costs about {usd(monthly)}/month (estimate).")
         rec += [f"Owner {esc(own['name'])} confirms the volume is unused.",
-                "If unused: snapshot it first, then delete it by hand. The system never deletes anything" + ("; it only adds a review tag." if tag_mode else " and changes nothing.")]
+                "If unused: snapshot it first, then delete it by hand. " + ("The system only adds a review tag." if tag_mode else "The system changes nothing.")]
     elif protected:
         fix.append("Idle-looking resource(s) are protected production: they must not be changed automatically.")
         rec += ["Platform team reviews whether the standby is right-sized (for example a smaller instance type) in a planned change window.",
                 "Do not stop it: it is tagged Protected / production."]
     else:
-        fix.append(f"{n} idle instance(s) cost about {usd(monthly)}/month while doing almost no work.")
+        fix.append(f"{n} idle instance(s) cost about {usd(monthly)}/month (estimate) while doing almost no work.")
         rec.append(f"Owner {esc(own['name'])} confirms the instances are not needed.")
         if tag_mode:
             rec += [f"If yes, a human approves the reversible tag (mark for stop in 2 days). Rollback: {esc(p['rollback'])}",
                     "The owner then stops them by hand. Realized savings are not measured here."]
         else:
-            rec += ["If yes, an approver records the decision (for the audit trail) and the owner stops them by hand. The system itself changes nothing.",
-                    "Realized savings are not measured here."]
+            rec.append("If yes, an approver records the decision (audit trail) and the owner stops them by hand. The system changes nothing.")
 
     ap, st_ = p["approval"] or {}, p["state"]
     if st_ == "PENDING":
         human = ("An approver opens the form and approves or rejects (ID + PIN). Nothing changes until a human decides."
-                 if tag_mode else "An approver opens the form and records approve or reject (ID + PIN). Either way the system changes nothing: the owner fixes it by hand.")
+                 if tag_mode else "An approver records approve or reject in the form (ID + PIN). The system changes nothing; the owner fixes it by hand.")
     elif st_ == "INVESTIGATED" and (p["classification"] == "needs_review" or own["status"] != "attributed"):
         human = "Owner / platform team must resolve ownership. No approval is possible yet."
     elif st_ == "REFUSED":
@@ -144,8 +166,40 @@ def build(p: dict, st: dict) -> dict:
 def render(b: dict) -> str:
     out = ["*Issue*"] + [f"• {x}" for x in b["issue"] or ["No material issue found."]]
     out += ["", "*Has to be fixed*"] + [f"• {x}" for x in b["fix"]]
-    out += ["", "*Recommendation* _(advice for humans; the system fixes nothing by itself)_"] + [f"• {x}" for x in b["recommendation"]]
+    out += ["", "*Recommendation*"] + [f"• {x}" for x in b["recommendation"]]
     if b["stats"]:
         out += ["", "*Stats*", "```", b["stats"], "```"]
     out += ["", f"*Who acts:* {b['who_acts']}"]
     return "\n".join(out)
+
+
+def digest_text(tenant: str, daily: list[float], spent30: float, budget: float | None, last3: float, expected3: float, top: list[tuple[str, float]]) -> str:
+    """Healthy-tenant message: just the costs. No recommendations, because nothing is wrong."""
+    L = [f":white_check_mark: *Cost check: all clear* \u2014 {esc(tenant)}",
+         "_No anomalies, no idle or orphaned resources, spend within budget. Nothing to do._", "", "*Costs*",
+         f"\u2022 Last 3 days: {usd(last3)} (expected about {usd(expected3)})",
+         f"\u2022 Last 30 days: {usd(spent30)}" + (f" of a {usd(budget)} monthly budget ({spent30 / budget * 100:.0f}%)" if budget else ""),
+         "\u2022 Top services (30 days): " + ", ".join(f"{esc(s)} {usd(v)}" for s, v in top)]
+    chart = []
+    if len(daily) >= 3:
+        chart.append("cost/day (14d)".ljust(16) + spark(daily) + f"  {usd(daily[0])} -> {usd(daily[-1])}")
+    if budget:
+        m = max(spent30, budget)
+        chart += ["budget (month)".ljust(16) + bar(budget, m) + f" {usd(budget)}", "30 days spent".ljust(16) + bar(spent30, m) + f" {usd(spent30)}"]
+    if chart:
+        L += ["", "*Stats*", "```", *chart, "```"]
+    return "\n".join(L)
+
+
+def cost_digest(tenant_id: str) -> str:
+    end = utcnow().date()
+    with tx(tenant_id) as c:
+        day = lambda a, b: c.execute("select coalesce(sum(amount),0) as a from cost_facts where tenant_id=%s and usage_date >= %s and usage_date < %s",
+                                     (tenant_id, end - timedelta(days=a), end - timedelta(days=b))).fetchone()["a"]
+        daily = [float(r["a"]) for r in c.execute("select sum(amount) as a from cost_facts where tenant_id=%s and usage_date >= %s and usage_date < %s "
+                                                  "group by usage_date order by usage_date", (tenant_id, end - timedelta(days=14), end)).fetchall()]
+        top = [(r["service"], float(r["a"])) for r in c.execute("select service, sum(amount) as a from cost_facts where tenant_id=%s and usage_date >= %s and usage_date < %s "
+                                                                 "group by service order by a desc limit 3", (tenant_id, end - timedelta(days=30), end)).fetchall()]
+        pp = c.execute("select policy_profile from tenants where tenant_id=%s", (tenant_id,)).fetchone()["policy_profile"] or {}
+        last3, prior, spent30 = float(day(3, 0)), float(day(31, 3)), float(day(30, 0))   # all inside the tenant-bound tx (RLS hides rows outside it)
+    return digest_text(tenant_id, daily, spent30, pp.get("monthly_budget_usd"), last3, prior / 28 * 3, top)

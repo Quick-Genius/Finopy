@@ -1,7 +1,10 @@
 """FinOps Sentinel API. Tenant and role are derived from the bearer token; see auth.py."""
 import json
 import logging
+import re
 import threading
+import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated
 from datetime import date
@@ -11,8 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict
 
-from . import analysis, approval, briefing, config, execution, inventory, outbox, policy, runner_client, summarize
-from .auth import Principal, current_principal, require_roles, tenant_for_case
+from . import analysis, approval, briefing, config, execution, integrations, inventory, outbox, overview, policy, runner_client, summarize, tenant_settings
+from .auth import ANY_ROLE, HUMAN, Principal, current_principal, require_roles, tenant_for_case
 from .db import open_pool, tx
 from .security import utcnow
 from .states import audit
@@ -65,12 +68,25 @@ async def lifespan(_):
 
 
 app = FastAPI(title="FinOps Sentinel API", version="1.0.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"], allow_methods=["GET", "POST"],
-                   allow_headers=["authorization", "content-type"])
+app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"], allow_methods=["GET", "POST", "PUT"],
+                   allow_headers=["authorization", "content-type", "x-request-id"], expose_headers=["x-request-id"])
+for _r in (overview.router, integrations.router, tenant_settings.router):
+    app.include_router(_r)
 
-ANY_ROLE = require_roles("analyst", "approver", "reviewer", "finance", "automation")
-HUMAN = require_roles("analyst", "approver", "reviewer", "finance")
+_RID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
+
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    """Correlation id on every response, no caching of tenant data, and one access-log line per non-health request."""
+    rid = request.headers.get("x-request-id", "")
+    rid = rid if _RID.match(rid) else uuid.uuid4().hex
+    t0 = time.monotonic()
+    response = await call_next(request)
+    response.headers.update({"x-request-id": rid, "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer"})
+    if request.url.path != "/health":
+        logging.getLogger("sentinel.access").info("%s %s %s %dms rid=%s", request.method, request.url.path, response.status_code, (time.monotonic() - t0) * 1000, rid)
+    return response
 
 def _case_or_404(c, tenant, case_id):
     row = c.execute("select * from cases where case_id=%s and tenant_id=%s", (case_id, tenant)).fetchone()

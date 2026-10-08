@@ -4,6 +4,7 @@ Runs as a one-shot container with DUMMY LocalStack credentials. Idempotent for L
 the SeedRole tag) and a full reset for the Postgres tables. Nothing here can reach a real cloud: the endpoint is fixed.
 """
 import hashlib
+import json
 import math
 import os
 import sys
@@ -18,6 +19,8 @@ assert "localstack" in ENDPOINT or "localhost" in ENDPOINT, "refusing to seed an
 REGION = "us-east-1"
 TODAY = date.fromisoformat(os.environ["SEED_TODAY"]) if os.environ.get("SEED_TODAY") else datetime.now(timezone.utc).date()
 DB = os.environ["OWNER_DATABASE_URL"]
+PROFILE = os.environ.get("SEED_PROFILE", "problem").strip().lower()      # healthy = everything fine, no alerts; problem = waste + overspend
+assert PROFILE in ("healthy", "problem"), "SEED_PROFILE must be healthy or problem"
 
 # role -> (name, tags, cpu profile)
 EC2 = {
@@ -29,6 +32,10 @@ EC2 = {
     "ana_etl": ("analytics-etl-1", {"TenantId": "analytics", "Owner": "analytics-data", "Environment": "production", "Workload": "etl"}, "busy"),
 }
 VOLUMES = {"ana_vol": ("analytics-notebook-scratch", {"TenantId": "analytics", "Owner": "analytics-data", "Environment": "dev", "Workload": "notebooks"})}
+
+if PROFILE == "healthy":      # busy machines, one consistent owner, no orphaned volume
+    EC2 = {k: (n, {**tg, **({"Owner": "payments-platform"} if k == "pay_shared" else {})}, "busy") for k, (n, tg, _) in EC2.items()}
+    VOLUMES = {}
 
 
 def jitter(key: str, i: int, spread: float) -> float:
@@ -82,6 +89,7 @@ def seed_db(ids: dict) -> None:
     with psycopg.connect(DB) as c:
         cur = c.cursor()
         c.execute("truncate tenants cascade")      # full tenant-data reset (principals cascade with tenants)
+        c.execute("truncate n8n_seen_events")      # event ids are deterministic: a reseed must not be mistaken for duplicates
         c.execute("insert into tenants values ('payments','Payments','payments-eng','{\"min_daily_excess_usd\":5}',now()), "
                   "('analytics','Analytics','analytics-eng','{\"min_daily_excess_usd\":5}',now())")
         cur.executemany("insert into owners values (%s,%s,%s)", [
@@ -91,13 +99,14 @@ def seed_db(ids: dict) -> None:
             ("payments", ids["pay_batch_1"], "payments-platform", "terraform:payments-batch", day(30)),
             ("payments", ids["pay_batch_2"], "payments-platform", "terraform:payments-batch", day(30)),
             ("payments", ids["pay_dr"], "payments-platform", "terraform:payments-dr", day(300)),
-            ("payments", ids["pay_shared"], "payments-platform", "terraform:payments-ingest", day(120)),   # conflicts with Owner=payments-risk tag
-            ("analytics", ids["ana_vol"], "analytics-data", "notebook-service", day(40))])
+            ("payments", ids["pay_shared"], "payments-platform", "terraform:payments-ingest", day(120))]    # problem profile: conflicts with Owner=payments-risk tag
+            + ([("analytics", ids["ana_vol"], "analytics-data", "notebook-service", day(40))] if "ana_vol" in ids else []))
         cur.executemany("insert into naming_rules values (%s,%s,%s,%s)", [
             ("payments", "name", "payments-batch-*", "payments-platform"), ("payments", "name", "payments-dr-*", "payments-platform"),
             ("analytics", "name", "analytics-notebook-*", "analytics-data")])
-        c.execute("insert into known_events values ('ev_checkout_v2','payments','checkout-api',%s,%s,'launch','Checkout v2 launch campaign',150)",
-                  (day(5), day(-3)))
+        if PROFILE == "problem":
+            c.execute("insert into known_events values ('ev_checkout_v2','payments','checkout-api',%s,%s,'launch','Checkout v2 launch campaign',150)",
+                      (day(5), day(-3)))
         cur.executemany("""insert into principals (principal_id, tenant_id, role, display_name, token_sha256, pin_hash, scope) values (%s,%s,%s,%s,%s,%s,%s)""", principals())
 
         rows = []
@@ -108,19 +117,32 @@ def seed_db(ids: dict) -> None:
         for n in range(60, 0, -1):                     # day(60) .. day(1): last complete day is yesterday
             d = day(n)
             add("payments", d, "AmazonRDS", "ledger-db", None, "payments-platform", 38 * wk(d) + jitter("ledger", n, 0.8))
-            launch = 2.4 if n <= 3 else 1.0           # launch spike in the 3-day analysis window
+            launch = 2.4 if (n <= 3 and PROFILE == "problem") else 1.0           # launch spike in the 3-day analysis window
             add("payments", d, "AWSLambda", "checkout-api", None, "payments-platform", (22 * wk(d) + jitter("lambda", n, 0.6)) * launch)
             add("payments", d, "AmazonEC2", "checkout-api", ids["pay_api"], "payments-platform", 15.0)
             add("payments", d, "AmazonEC2", "batch-dev", None, "payments-platform", 4.0 + jitter("batchbase", n, 0.25))
-            if n <= 9:                                 # two idle instances forgotten ~9 days ago
+            if PROFILE == "problem" and n <= 9:        # two idle instances forgotten ~9 days ago
                 add("payments", d, "AmazonEC2", "batch-dev", ids["pay_batch_1"], "payments-platform", 7.0)
                 add("payments", d, "AmazonEC2", "batch-dev", ids["pay_batch_2"], "payments-platform", 7.0)
+            elif PROFILE == "healthy":                 # the same two instances, small, busy and flat
+                add("payments", d, "AmazonEC2", "batch-dev", ids["pay_batch_1"], "payments-platform", 2.0)
+                add("payments", d, "AmazonEC2", "batch-dev", ids["pay_batch_2"], "payments-platform", 2.0)
             add("payments", d, "AmazonEC2", "dr-standby", ids["pay_dr"], "payments-platform", 12.5)
             add("payments", d, "AmazonEC2", "shared-ingest", ids["pay_shared"], None, 9.0)
             add("analytics", d, "AmazonEC2", "etl", ids["ana_etl"], "analytics-data", 21 * wk(d) + jitter("etl", n, 0.5))
             add("analytics", d, "AmazonS3", "warehouse", None, "analytics-data", 14 * wk(d) + jitter("s3", n, 0.4))
-            add("analytics", d, "AmazonEBS", "notebooks", ids["ana_vol"], "analytics-data", 5.33)
+            if "ana_vol" in ids:
+                add("analytics", d, "AmazonEBS", "notebooks", ids["ana_vol"], "analytics-data", 5.33)
         cur.executemany("insert into cost_facts (tenant_id, usage_date, service, workload, resource_id, owner_tag, amount, currency) values (%s,%s,%s,%s,%s,%s,%s,%s)", rows)
+        # monthly budgets, derived from each tenant's own last-30-day spend so the story is deterministic:
+        #   healthy: budget is 25% above spend (comfortable) for both tenants
+        #   problem: payments spent ~14% MORE than its budget; analytics stays comfortably inside
+        spent = {t: sum(r[6] for r in rows if r[0] == t and r[1] >= day(30)) for t in ("payments", "analytics")}
+        factor = {"payments": 1.25 if PROFILE == "healthy" else 0.88, "analytics": 1.25}
+        for tnt in spent:
+            budget = int(round(float(spent[tnt]) * factor[tnt], -1))
+            c.execute("update tenants set policy_profile = policy_profile || %s::jsonb where tenant_id=%s", (json.dumps({"monthly_budget_usd": budget}), tnt))
+            print(f"budget {tnt}: ${budget:,} (last-30-day spend ${float(spent[tnt]):,.2f})")
 
         util = []
         for role, (_, tags, prof) in EC2.items():

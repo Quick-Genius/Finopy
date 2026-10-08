@@ -90,19 +90,42 @@ def n_detect(s: S) -> S:
                 x = f(wl, "unattached-ebs")
                 x["resources"].append(r)
                 x["wastes"].append({"resource_id": r["resource_id"], "type": "unattached_ebs", "detail": res,
-                                    "summary": f"{r['resource_id']} has been unattached for {res['age_days']} days"})
+                                    "summary": f"{r['resource_id']} is not attached to any instance (state: available)"})
     # spend anomalies not already explained by a waste finding on the same workload+service
     waste_services = {("idle-ec2", "AmazonEC2"), ("unattached-ebs", "AmazonEBS")}
     covered = {(w, svc) for (w, k) in findings for (kk, svc) in waste_services if kk == k}
     for (service, workload), sp in s["spend"].items():
         if sp["status"] == "anomaly" and (workload, service) not in covered:
             f(workload, "spend-anomaly").update({"service": service})
+    # tenant-level budget: spend over the last 30 days vs the monthly budget (reference data), with the biggest cost drivers named
+    tn = d.get("tenant") or {}
+    if tn.get("monthly_budget_usd"):
+        budget = Decimal(str(tn["monthly_budget_usd"]))
+        spent = sum((f["amount"] for f in d["cost_facts"] if f["usage_date"] >= we - timedelta(days=30)), Decimal(0))
+        if spent > budget:
+            drivers = []
+            for (svc, wl), ser in sr["daily"].items():
+                recent = [a for dt, a in ser.items() if we - timedelta(days=10) <= dt < we]
+                base = [a for dt, a in ser.items() if we - timedelta(days=30) <= dt < we - timedelta(days=10)]
+                if recent and base:
+                    drivers.append((sum(recent) / len(recent) - sum(base) / len(base), svc, wl))
+            drivers.sort(reverse=True)
+            top = [{"service": svc, "workload": wl, "daily_increase": str(money(inc))} for inc, svc, wl in drivers[:3] if inc > 0]
+            findings[("all-services", "budget-overrun")] = {
+                "workload": "all-services", "kind": "budget-overrun", "resources": [], "wastes": [], "service": "All services",
+                "budget": {"budget_usd": str(money(budget)), "spent_30d_usd": str(money(spent)), "over_usd": str(money(spent - budget)),
+                           "over_pct": round(float((spent - budget) / budget * 100), 1), "top_drivers": top},
+                "attribution": {"status": "attributed", "owner": tn.get("owner_group"), "confidence": 0.95, "reason": "tenant owner group (reference data)",
+                                "evidence": [{"source": "tenant_owner_group", "owner": tn.get("owner_group"), "ref": "tenants.owner_group", "rank": 2, "confidence": 0.95}],
+                                "per_resource": []}}
     return {"findings": findings}
 
 
 def n_attribute(s: S) -> S:
     d = s["data"]
     for fd in s["findings"].values():
+        if "attribution" in fd:                       # the budget finding is attributed to the tenant owner group already
+            continue
         fd["attribution"] = attribute_group(s["tenant"], fd["resources"], d["ref"], s["series"]["owner_tags"].get(fd["workload"], set()))
     return {}
 
@@ -110,6 +133,12 @@ def n_attribute(s: S) -> S:
 def n_assess(s: S) -> S:
     d, we = s["data"], s["window_end"]
     for (workload, kind), fd in s["findings"].items():
+        if kind == "budget-overrun":
+            b = fd["budget"]
+            fd["spend"], fd["events"] = None, []
+            fd["assessment"] = {"classification": "needs_review", "confidence": 0.9,
+                                "reasons": [f"spend over the last 30 days (${b['spent_30d_usd']}) is {b['over_pct']}% above the monthly budget (${b['budget_usd']})"]}
+            continue
         service = fd.get("service") or ("AmazonEC2" if kind == "idle-ec2" else "AmazonEBS")
         fd["service"] = service
         fd["spend"] = s["spend"].get((service, workload))
@@ -134,6 +163,22 @@ def n_recommend(s: S) -> S:
     we, tenant = s["window_end"], s["tenant"]
     drafts = []
     for (workload, kind), fd in s["findings"].items():
+        if kind == "budget-overrun":
+            b, a = fd["budget"], fd["assessment"]
+            content = {
+                "schema_version": "1.0", "workload": workload, "kind": kind, "service": fd["service"],
+                "signal": {"service": fd["service"], "currency": "USD", "status": "budget_overrun",
+                           "window": {"start": (we - timedelta(days=30)).isoformat(), "end": we.isoformat()},
+                           "actual": b["spent_30d_usd"], "expected": b["budget_usd"], "anomaly_score": None, "features": b},
+                "waste_indicators": [], "attribution": {k: fd["attribution"][k] for k in ("status", "owner", "confidence", "reason", "evidence")},
+                "assessment": a, "candidates": [],
+                "recommendation": {"route": "review", "intent": None, "template": None, "risk": "low", "priority": round(float(b["over_usd"]) * 0.9 * 0.95, 2),
+                                   "rollback": "n/a",
+                                   "projected_savings": {"monthly": "0.0000", "currency": "USD", "per_resource": {}, "status": "projected", "assumptions": []},
+                                   "realized_savings": {"status": "not_measured", "amount": None, "note": "a budget alert proposes no change"}}}
+            drafts.append({"case_id": f"case_{tenant}_all-services-budget-overrun", "dedupe_key": "all-services:budget-overrun", "content": content,
+                           "evidence": [("budget", "tenants.policy_profile", b), ("attribution", "tenants.owner_group", fd["attribution"]), ("assessment", "assess", a)]})
+            continue
         a, sp = fd["assessment"], fd["spend"]
         cand = sorted(r["resource_id"] for r in fd["resources"])
         risk = _risk(fd["resources"]) if fd["resources"] else "low"

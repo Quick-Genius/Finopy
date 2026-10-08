@@ -55,6 +55,19 @@ NEW → INVESTIGATED → DRY_RUN → PENDING → APPROVED            (default, a
 | n8n → API | `POST /approve` | automation token **and** HMAC | decision callback (`approve`/`reject`/`timeout`) |
 | n8n → API | `GET/PUT /internal/events/{event_id}` | automation token | delivery dedupe: check before, mark **only after** success |
 
+## Dashboard endpoints (human principals; tenant always from the token)
+| Endpoint | Roles | Purpose |
+|---|---|---|
+| `GET /overview` | analyst, approver, reviewer, finance | one read model for the dashboard: totals, savings by workload/owner, 45-day spend, pending approvals, recent audit events (`overview.py`; money as 2-decimal strings) |
+| `GET /integrations` | same | catalog with live status: AWS inventory freshness, n8n outbox health, runner, DB role (RLS), AI summaries; Slack is reported as managed in n8n because the API cannot observe it |
+| `PUT /integrations/{provider}/interest` | same | register or withdraw interest in a **planned** connector (per tenant, audited). Live connectors answer 409, unknown ones 404 |
+| `GET /settings` | same | effective workspace settings, defaults, options, `can_edit`, and the read-only server guardrails |
+| `PUT /settings` | reviewer | change which outcomes notify (`REFUSED/APPROVED/REJECTED/EXPIRED/VERIFIED`) and the minimum projected saving. Strict schema (`extra=forbid`), audited with before/after |
+
+Settings only tune *who is told*. `POLICY_INVALID`, `EXECUTION_FAILED` and `VERIFICATION_FAILED` can never be muted, and `ACTION_MODE` and every safety limit stay in the server environment, so no setting can widen what the system may change. The rule is applied where the outbox event is written (`states.transition`), so a muted outcome is never queued; the audit event is written regardless. Tables `tenant_settings` and `integration_interest` (migration 003) are under row-level security with no DELETE grant.
+
+Every response carries `x-request-id` (a valid inbound id is echoed), `cache-control: no-store`, `x-content-type-options: nosniff` and `referrer-policy: no-referrer`; non-health requests are access-logged with that id.
+
 ## Event contracts (schema_version `1.0`)
 `case.created` / `case.updated` (blueprint example, extended): `event_id` (`evt_` + sha256(case|version|type)[:20], stable), `case_id`, `case_version`, `tenant_id`, `observed_at` (UTC), `signal{service, actual, expected, currency, anomaly_score}`, `attribution{owner, confidence, evidence[]}`, `assessment`, `recommendation{route, action, template, monthly_saving, currency, risk}`, `callback.case_url`.
 `case.state_changed` (REFUSED, POLICY_INVALID, APPROVED, REJECTED, EXPIRED, VERIFIED, VERIFICATION_FAILED, EXECUTION_FAILED): `event_id`, `occurred_at`, `tenant_id`, `case_id`, `case_version`, `from_state`, `to_state`, `actor`, `summary{workload, kind, owner, risk, classification, projected_monthly}`, `detail{reasons[], note, matched_ids[], verification_ok}`. Whitelisted and truncated in `app/states.py::notify_payload`; no policy text, PINs or tokens. Written to the outbox in the same transaction as the transition.

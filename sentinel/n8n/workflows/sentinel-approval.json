@@ -212,7 +212,7 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.SENTINEL_API }}/approvals/{{ encodeURIComponent($json.approval_id) }}/form-url",
+        "url": "={{ $env.SENTINEL_API }}/approvals/{{ encodeURIComponent($node['Check packet'].json.approval_id) }}/form-url",
         "sendHeaders": true,
         "specifyHeaders": "keypair",
         "headerParameters": {
@@ -380,7 +380,7 @@
         40
       ],
       "parameters": {
-        "jsCode": "\n// Everything shown comes from the API's own record of the approval; values are HTML-escaped.\nconst p = $('Check packet').first().json;\nconst e = (s) => String(s ?? '').replace(/[&<>\"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[c]));\nconst err = $json.lastError ? `<p style=\"color:#b3261e\"><b>Previous attempt refused:</b> ${e($json.lastError)}</p>` : '';\nconst rows = [\n  ['Tenant', p.tenant_id], ['Accountable owner', `${p.owner} (confidence ${p.attribution_confidence})`], ['Proposed fix', p.action_mode === 'tag_after_approval' ? `${p.action} via template ${p.template} (applied by the isolated runner after you approve)` : `${p.action} via template ${p.template} (NOT applied by the system: approving only records your decision, a person does the fix)`],\n  ['Exact targets (' + p.target_count + ')', p.targets.map((t) => `${t.id}${t.name ? ' (' + t.name + ')' : ''}`).join(', ')],\n  ['Excluded', (p.excluded || []).map((x) => `${x.resource_id}: ${x.reason}`).join('; ') || 'none'],\n  ['Projected saving', `${p.projected_savings.monthly} ${p.projected_savings.currency}/month (projected, not realized)`],\n  ['Assumptions', (p.projected_savings.assumptions || []).join('; ')], ['Risk', p.risk], ['Rollback', p.rollback], ['Why', (p.why || []).join('; ')],\n  ['Policy sha256', p.policy_sha256], ['Target-set sha256', p.target_set_sha256], ['Case / version', `${p.case_id} / v${p.case_version}`], ['Expires (UTC)', p.expires_at],\n];\nconst html = err + '<table style=\"text-align:left;font-size:13px\">' + rows.map(([k, v]) => `<tr><th style=\"padding-right:12px;vertical-align:top\">${e(k)}</th><td style=\"word-break:break-all\">${e(v)}</td></tr>`).join('') + '</table>' +\n  '<p>Your decision is checked by the Sentinel API against its own copy of these values. The form cannot change targets, policy or tenant.</p>';\nreturn [{ json: { formHtml: html, retry: !!$json.lastError } }];\n"
+        "jsCode": "\n// Everything shown comes from the API's own record of the approval; values are HTML-escaped.\nconst p = $('Check packet').first().json;\nconst e = (s) => String(s ?? '').replace(/[&<>\"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[c]));\nconst err = $json.lastError ? `<p style=\"color:#b3261e\"><b>Previous attempt refused:</b> ${e($json.lastError)}</p>` : '';\nconst money = (x) => '$' + Number(x).toFixed(2).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ',');\nconst when = (t) => { try { const d = new Date(t).toISOString(); return d.slice(0, 10) + ' ' + d.slice(11, 16) + ' UTC'; } catch (x) { return t; } };\nconst tag = p.action_mode === 'tag_after_approval';\nconst targets = p.targets.map((t) => `<li><code>${e(t.id)}</code>${t.name ? ' \u2014 ' + e(t.name) : ''}</li>`).join('');\nconst excluded = (p.excluded || []).map((x) => `<li><code>${e(x.resource_id)}</code> \u2014 ${e(x.reason)}</li>`).join('');\nconst h = (t) => `<div style=\"margin:18px 0 6px;font-weight:700;font-size:14px;text-transform:uppercase;letter-spacing:.04em;color:#555\">${e(t)}</div>`;\nconst kv = (k, v) => `<div style=\"display:flex;gap:12px;padding:5px 0;border-bottom:1px solid #eee\"><div style=\"width:130px;flex:none;color:#666\">${e(k)}</div><div style=\"flex:1;font-weight:600\">${v}</div></div>`;\nconst html = `<div style=\"text-align:left;font-size:14px;line-height:1.5\">` + err +\n  `<div style=\"background:#fff4e5;border:1px solid #f0c27b;border-radius:6px;padding:8px 10px;margin-bottom:8px\">` +\n  (tag ? `Alert only. Approving lets the isolated runner add ONE reversible tag. Nothing else is changed.`\n       : `Alert only. Approving only <b>records your decision</b>. The system changes nothing; the owner fixes it by hand.`) + `</div>` +\n  h('Summary') + kv('Tenant', e(p.tenant_id)) + kv('Owner', e(p.owner || 'not established')) +\n  kv('Estimated cost', e(money(p.projected_savings.monthly)) + ' / month <span style=\"font-weight:400;color:#666\">(estimate, not measured)</span>') +\n  kv('Risk', e(p.risk)) + kv('Expires', e(when(p.expires_at)) + ' <span style=\"font-weight:400;color:#666\">(no answer = expires; never auto-approved)</span>') +\n  h('Why it was flagged') + `<ul style=\"margin:4px 0 0 18px;padding:0\">${(p.why || []).map((x) => `<li>${e(x)}</li>`).join('')}</ul>` +\n  h('What this decision covers') + `<ul style=\"margin:4px 0 0 18px;padding:0\">${targets}</ul>` +\n  (excluded ? `<div style=\"margin-top:6px;color:#666\">Not included:</div><ul style=\"margin:2px 0 0 18px;padding:0\">${excluded}</ul>` : '') +\n  h('If you approve') + `<div>Proposed: ${e(p.action)}.${tag ? '' : ' It is <b>not</b> applied by the system.'}</div><div>Rollback: ${e(p.rollback)}</div>` +\n  `<div style=\"margin-top:18px;padding-top:8px;border-top:1px solid #ddd;color:#888;font-size:11px;word-break:break-all\">` +\n  `Technical details (checked by the API, the form cannot change them): ${e(p.case_id)} v${e(p.case_version)} \u00b7 template ${e(p.template)} \u00b7 policy ${e(p.policy_sha256)} \u00b7 targets ${e(p.target_set_sha256)}</div></div>`;\nreturn [{ json: { formHtml: html, retry: !!$json.lastError } }];\n"
       }
     },
     {
@@ -393,7 +393,7 @@
         40
       ],
       "parameters": {
-        "jsCode": "const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst sm = (() => { try { const b = $('Summarize case').first().json.body; return b && b.summary ? b : null; } catch (e) { return null; } })();\n\n// Sent once per approval (not again after a wrong-PIN retry). The link is the n8n form; the API still checks ID + PIN.\nif ($json.retry) return [{ json: { slack_text: '' } }];\nconst p = $('Check packet').first().json;\nconst ids = p.targets.map((t) => `${esc(t.id)}${t.name ? ' (' + esc(t.name) + ')' : ''}`).join(', ');\nconst lines = [`:bell: *Approval needed* \\u2014 ${esc(p.owner)} \\u00b7 tenant *${esc(p.tenant_id)}*`,\n  `case \\`${esc(p.case_id)}\\` v${esc(p.case_version)} \\u00b7 proposed fix: ${esc(p.action)} \\u00b7 risk: ${esc(p.risk)}`,\n  p.action_mode === 'tag_after_approval' ? '_Alert only: nothing has been changed yet. A human decides; the only action the system can ever take is a reversible tag._' : '_Alert only: nothing has been changed, and the system will not change anything. A human decides and fixes it by hand._', ''];\nif (sm && sm.briefing) lines.push(sm.briefing, '');\nelse lines.push(`projected saving: ${esc(p.projected_savings.monthly)} ${esc(p.projected_savings.currency)}/month (projected, not realized)`, `rollback: ${esc(p.rollback)}`, '');\nlines.push(`*Exact targets (${p.target_count}):* ${ids}`);\nif (p.excluded && p.excluded.length) lines.push('*Excluded:* ' + p.excluded.map((x) => `${esc(x.resource_id)} (${esc(x.reason)})`).join('; '));\nlines.push(`*Expires:* ${esc(p.expires_at)}`,\n  `<${$execution.resumeFormUrl}|Open the approval form> \\u2014 needs approver ID + PIN. Silence expires it; nothing is ever auto-approved.`);\n\nif (sm) lines.push('', '*Investigation summary* (' + (sm.source === 'llm' ? 'AI-written from verified evidence, every number and id fact-checked' : 'built from verified evidence') + '):\\n' + esc(sm.summary));\ntry { lines.push('', '_ref ' + $('Verify signature').first().json.event.event_id + '_'); } catch (e) { /* no reference available */ }\nreturn [{ json: { slack_text: lines.join('\\n') } }];\n"
+        "jsCode": "const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst money = (x) => '$' + Number(x).toFixed(2).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ',');\nconst when = (s) => { try { const d = new Date(s).toISOString(); return d.slice(0, 10) + ' ' + d.slice(11, 16) + ' UTC'; } catch (e) { return esc(s); } };\nconst sm = (() => { try { const b = $('Summarize case').first().json.body; return b && b.summary ? b : null; } catch (e) { return null; } })();\nconst brief = sm ? ['*In short* _(' + (sm.source === 'llm' ? 'AI-written, numbers fact-checked' : 'auto-generated from the data') + ')_', esc(sm.summary), ''] : [];\n\n// Sent once per approval (not again after a wrong-PIN retry). The link is the n8n form; the API still checks ID + PIN.\nif ($json.retry) return [{ json: { slack_text: '' } }];\nconst p = $('Check packet').first().json;\nconst ids = p.targets.map((t) => `${esc(t.id)}${t.name ? ' (' + esc(t.name) + ')' : ''}`).join(', ');\nconst lines = [`:bell: *Approval needed* \\u2014 ${esc(p.owner)} \\u00b7 ${esc(p.tenant_id)}`,\n  `\\`${esc(p.case_id)}\\` \\u00b7 risk: ${esc(p.risk)}`,\n  p.action_mode === 'tag_after_approval' ? '_Alert only: nothing has been changed yet. A human decides; the only action the system can ever take is a reversible tag._' : '_Alert only: the system changes nothing. A human decides and fixes it by hand._', '', ...brief];\nif (sm && sm.briefing) lines.push(sm.briefing, '');\nelse lines.push(`estimated saving: ${money(p.projected_savings.monthly)}/month (estimate, not measured)`, `rollback: ${esc(p.rollback)}`, '');\nlines.push(`*Target${p.target_count > 1 ? 's (' + p.target_count + ')' : ''}:* ${ids}`);\nif (p.excluded && p.excluded.length) lines.push('*Excluded:* ' + p.excluded.map((x) => `${esc(x.resource_id)} (${esc(x.reason)})`).join('; '));\nlines.push(`*Decide:* <${$execution.resumeFormUrl}|Open the approval form> (approver ID + PIN) \\u00b7 expires ${when(p.expires_at)} if nobody answers`);\n\ntry { lines.push('', '_ref ' + $('Verify signature').first().json.event.event_id + '_'); } catch (e) { /* no reference available */ }\nreturn [{ json: { slack_text: lines.join('\\n') } }];\n"
       }
     },
     {
@@ -845,7 +845,7 @@
       "main": [
         [
           {
-            "node": "Publish form URL",
+            "node": "Summarize case",
             "type": "main",
             "index": 0
           }
@@ -895,18 +895,18 @@
         ]
       ]
     },
-    "Respond accepted": {
+    "Summarize case": {
       "main": [
         [
           {
-            "node": "Summarize case",
+            "node": "Publish form URL",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Summarize case": {
+    "Respond accepted": {
       "main": [
         [
           {

@@ -77,7 +77,7 @@
     },
     {
       "id": "sentinelAnalysis01-3",
-      "name": "Respond 202",
+      "name": "Respond 200 (started)",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
@@ -88,7 +88,7 @@
         "respondWith": "json",
         "responseBody": "={{ JSON.stringify({ started: true }) }}",
         "options": {
-          "responseCode": 202
+          "responseCode": 200
         }
       }
     },
@@ -220,7 +220,7 @@
       "main": [
         [
           {
-            "node": "Respond 202",
+            "node": "Respond 200 (started)",
             "type": "main",
             "index": 0
           }
@@ -234,7 +234,7 @@
         ]
       ]
     },
-    "Respond 202": {
+    "Respond 200 (started)": {
       "main": [
         [
           {

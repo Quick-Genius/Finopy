@@ -19,7 +19,22 @@ cd sentinel
 ./scripts/reset.sh     # reset only (wipes DB, n8n state, LocalStack; keeps the CloudQuery plugin cache)
 ```
 First build is slow (the PostgreSQL destination plugin is compiled with Go; n8n image is large). Then: dashboard http://localhost:3000 · n8n http://localhost:5678 (`demo@sentinel.local` / `Sentinel-Demo-1`) · API http://localhost:8000/docs.
+
+Dashboard pages: **Dashboard** (savings, spend chart, approval queue, case drawer), **Integrations** (live connector status; planned ones take a "Notify me"), **Settings** (theme/density/refresh in the browser; workspace notification rules for reviewers; read-only safety guardrails). Front-end dev: `cd dashboard && API_TARGET=http://localhost:8000 npm run dev`.
 Trigger a run: `curl -X POST localhost:5678/webhook/sentinel-run-now -H "x-run-now-secret: $(grep RUN_NOW_SECRET .env | cut -d= -f2)"` (an hourly schedule exists too).
+
+## Two seeded datasets
+`SEED_PROFILE` (or `./scripts/reset.sh healthy|problem`) selects what gets seeded; each tenant also gets a **monthly budget** (stored in `tenants.policy_profile`).
+- **healthy**: busy machines, one consistent owner, no orphaned volume, spend inside budget. The only output is one *"Cost check: all clear"* Slack message per tenant (costs, budget bar, top services); no cases, no recommendations, nothing to approve.
+- **problem** (default): the scenarios below, plus a **budget overrun** for Payments (30-day spend above its monthly budget, with the biggest growth drivers). It is a `needs_review` alert for finance/owner: no technical action exists for it.
+
+```bash
+./scripts/demo.sh            # healthy, then problem, into the real Slack channel (pauses between them)
+./scripts/demo.sh healthy    # or only one of them
+python3 scripts/e2e.py --healthy | --happy | --outbox | --expiry   # automated checks per scenario (expiry needs a short APPROVAL_TTL_SECONDS)
+python3 scripts/status_audit.py   # proves every HTTP call in the API/runner/n8n logs was 2xx (negative tests in plain e2e.py are 4xx on purpose)
+```
+Optional AI (`LLM_PROVIDER=alibaba`, `LLM_MODEL=qwen3.7-flash`): only rewrites verified evidence (what is wrong, evidence, owner); thinking mode is switched off and every number/id/owner is fact-checked against the evidence, otherwise the deterministic template is used.
 
 ## What is seeded (deterministic, relative to the seed date)
 | Tenant | Scenario | Outcome |

@@ -25,7 +25,7 @@ function CostChart({ s }) {
   );
 }
 
-const Sec = ({ title, children }) => <section><h3>{title}</h3>{children}</section>;
+const Sec = ({ title, children }) => <section className="panel"><h3>{title}</h3>{children}</section>;
 const Hash = ({ label, v }) => <div className="hash"><span className="muted">{label}</span><code>{v}</code></div>;
 
 export default function CaseDetail({ id, me, onChanged }) {

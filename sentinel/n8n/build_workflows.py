@@ -140,10 +140,10 @@ def summary_node(w, case_id_expr, pos):
 
 SM_JS = r"""
 const sm = (() => { try { const b = $('Summarize case').first().json.body; return b && b.summary ? b : null; } catch (e) { return null; } })();
+const brief = sm ? ['*In short* _(' + (sm.source === 'llm' ? 'AI-written, numbers fact-checked' : 'auto-generated from the data') + ')_', esc(sm.summary), ''] : [];
 """
 
 SUMMARY_JS = r"""
-if (sm) lines.push('', '*Investigation summary* (' + (sm.source === 'llm' ? 'AI-written from verified evidence, every number and id fact-checked' : 'built from verified evidence') + '):\n' + esc(sm.summary));
 try { lines.push('', '_ref ' + $('Verify signature').first().json.event.event_id + '_'); } catch (e) { /* no reference available */ }
 """
 
@@ -155,7 +155,9 @@ const r = $input.first().json; const c = Number(r.statusCode || 0);
 if (c === 0 || c === 429 || c >= 500) throw new Error('Slack temporary failure HTTP ' + c);
 return [{ json: { slack_status: c, slack_ok: c === 200, slack_error: c === 200 ? null : String(r.body || '').slice(0, 120) } }];
 """
-ESC = "const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');"
+ESC = ("const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n"
+       "const money = (x) => '$' + Number(x).toFixed(2).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ',');\n"
+       "const when = (s) => { try { const d = new Date(s).toISOString(); return d.slice(0, 10) + ' ' + d.slice(11, 16) + ' UTC'; } catch (e) { return esc(s); } };")
 
 
 def slack_chain(w, tag, src, dst, pos, fail=None):
@@ -181,7 +183,7 @@ def build_analysis():
     sched = w.add("Hourly schedule", "n8n-nodes-base.scheduleTrigger", 1.2, {"rule": {"interval": [{"field": "hours", "hoursInterval": 1}]}}, [0, 0])
     hook = w.add("Run now (manual)", "n8n-nodes-base.webhook", 2, webhook("sentinel-run-now"), [0, 200], webhookId="sentinel-run-now")
     ok = w.add("Secret ok?", "n8n-nodes-base.if", 2.2, if_true("={{ !!$env.SENTINEL_RUN_NOW_SECRET && $json.headers['x-run-now-secret'] === $env.SENTINEL_RUN_NOW_SECRET }}"), [220, 200])
-    r202 = w.add("Respond 202", "n8n-nodes-base.respondToWebhook", 1.1, respond(202, '={{ JSON.stringify({ started: true }) }}'), [440, 120])
+    r202 = w.add("Respond 200 (started)", "n8n-nodes-base.respondToWebhook", 1.1, respond(200, '={{ JSON.stringify({ started: true }) }}'), [440, 120])
     r401 = w.add("Respond 401", "n8n-nodes-base.respondToWebhook", 1.1, respond(401, '={{ JSON.stringify({ error: "bad run-now secret" }) }}'), [440, 300])
     sync = w.add("CloudQuery sync", "n8n-nodes-base.httpRequest", 4.2,
                  http("POST", "={{ $env.SENTINEL_CQ_URL }}/sync", [{"name": "Authorization", "value": "=Bearer {{ $env.SENTINEL_CQ_TOKEN }}"}], timeout=600000, full=False), [680, 0])
@@ -228,11 +230,11 @@ const k = $('Check case').first().json;
 const rec = k.content.recommendation;
 if (rec.route !== 'review') return [{ json: { slack_text: '' } }];
 const a = k.content.attribution;
-const lines = [`:mag: *Needs human review* \u2014 ${esc(k.content.workload)} (${esc(k.tenant_id)})`,
-  `case \`${esc(k.case_id)}\` \u00b7 ${esc(k.content.assessment.classification)} \u00b7 owner: ${esc(a.owner || 'unknown')} (confidence ${esc(a.confidence)})`,
-  '_Alert only: nothing has been changed, and nothing can be approved until ownership is resolved._', ''];
+const lines = [`:mag: *Needs human review* \u2014 ${esc(k.content.workload)} \u00b7 ${esc(k.tenant_id)}`,
+  `\`${esc(k.case_id)}\` \u00b7 owner: ${esc(a.owner || 'unknown')}`,
+  '_Alert only: the system changes nothing. A person reviews this one; there is no approval form._', '', ...brief];
 if (sm && sm.briefing) lines.push(sm.briefing);
-else lines.push('why: ' + k.content.assessment.reasons.map(esc).join('; '), `projected: ${esc(rec.projected_savings.monthly)} USD/month (projected, not realized)`);
+else lines.push('why: ' + k.content.assessment.reasons.map(esc).join('; '), `estimated cost: ${money(rec.projected_savings.monthly)}/month (estimate, not measured)`);
 """ + SUMMARY_JS + r"""return [{ json: { slack_text: lines.join('\n') } }];
 """}, [1400, 140])
     needs = w.add("Needs review?", "n8n-nodes-base.if", 2.2, if_true("={{ $json.content.recommendation.route === 'review' }}"), [1300, 140])
@@ -258,7 +260,7 @@ def build_approval():
                 http("GET", f"={API}/approvals/{{{{ encodeURIComponent($node['Verify signature'].json.event.approval_id) }}}}"), [800, 40], **ON_ERR)
     chkp = w.add("Check packet", "n8n-nodes-base.code", 2, {"jsCode": CHECK_200}, [1000, 40], **ON_ERR)
     pub = w.add("Publish form URL", "n8n-nodes-base.httpRequest", 4.2,
-                http("POST", f"={API}/approvals/{{{{ encodeURIComponent($json.approval_id) }}}}/form-url", body="={{ JSON.stringify({ form_url: $execution.resumeFormUrl }) }}"), [1200, 40], **ON_ERR)
+                http("POST", f"={API}/approvals/{{{{ encodeURIComponent($node['Check packet'].json.approval_id) }}}}/form-url", body="={{ JSON.stringify({ form_url: $execution.resumeFormUrl }) }}"), [1200, 40], **ON_ERR)
     chkpub = w.add("Check published", "n8n-nodes-base.code", 2, {"jsCode": r"""
 const r = $input.first().json;
 if (r.statusCode !== 200) throw new Error('form-url publish answered HTTP ' + r.statusCode);
@@ -272,16 +274,26 @@ return [{ json: { published: true } }];
 const p = $('Check packet').first().json;
 const e = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const err = $json.lastError ? `<p style="color:#b3261e"><b>Previous attempt refused:</b> ${e($json.lastError)}</p>` : '';
-const rows = [
-  ['Tenant', p.tenant_id], ['Accountable owner', `${p.owner} (confidence ${p.attribution_confidence})`], ['Proposed fix', p.action_mode === 'tag_after_approval' ? `${p.action} via template ${p.template} (applied by the isolated runner after you approve)` : `${p.action} via template ${p.template} (NOT applied by the system: approving only records your decision, a person does the fix)`],
-  ['Exact targets (' + p.target_count + ')', p.targets.map((t) => `${t.id}${t.name ? ' (' + t.name + ')' : ''}`).join(', ')],
-  ['Excluded', (p.excluded || []).map((x) => `${x.resource_id}: ${x.reason}`).join('; ') || 'none'],
-  ['Projected saving', `${p.projected_savings.monthly} ${p.projected_savings.currency}/month (projected, not realized)`],
-  ['Assumptions', (p.projected_savings.assumptions || []).join('; ')], ['Risk', p.risk], ['Rollback', p.rollback], ['Why', (p.why || []).join('; ')],
-  ['Policy sha256', p.policy_sha256], ['Target-set sha256', p.target_set_sha256], ['Case / version', `${p.case_id} / v${p.case_version}`], ['Expires (UTC)', p.expires_at],
-];
-const html = err + '<table style="text-align:left;font-size:13px">' + rows.map(([k, v]) => `<tr><th style="padding-right:12px;vertical-align:top">${e(k)}</th><td style="word-break:break-all">${e(v)}</td></tr>`).join('') + '</table>' +
-  '<p>Your decision is checked by the Sentinel API against its own copy of these values. The form cannot change targets, policy or tenant.</p>';
+const money = (x) => '$' + Number(x).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+const when = (t) => { try { const d = new Date(t).toISOString(); return d.slice(0, 10) + ' ' + d.slice(11, 16) + ' UTC'; } catch (x) { return t; } };
+const tag = p.action_mode === 'tag_after_approval';
+const targets = p.targets.map((t) => `<li><code>${e(t.id)}</code>${t.name ? ' — ' + e(t.name) : ''}</li>`).join('');
+const excluded = (p.excluded || []).map((x) => `<li><code>${e(x.resource_id)}</code> — ${e(x.reason)}</li>`).join('');
+const h = (t) => `<div style="margin:18px 0 6px;font-weight:700;font-size:14px;text-transform:uppercase;letter-spacing:.04em;color:#555">${e(t)}</div>`;
+const kv = (k, v) => `<div style="display:flex;gap:12px;padding:5px 0;border-bottom:1px solid #eee"><div style="width:130px;flex:none;color:#666">${e(k)}</div><div style="flex:1;font-weight:600">${v}</div></div>`;
+const html = `<div style="text-align:left;font-size:14px;line-height:1.5">` + err +
+  `<div style="background:#fff4e5;border:1px solid #f0c27b;border-radius:6px;padding:8px 10px;margin-bottom:8px">` +
+  (tag ? `Alert only. Approving lets the isolated runner add ONE reversible tag. Nothing else is changed.`
+       : `Alert only. Approving only <b>records your decision</b>. The system changes nothing; the owner fixes it by hand.`) + `</div>` +
+  h('Summary') + kv('Tenant', e(p.tenant_id)) + kv('Owner', e(p.owner || 'not established')) +
+  kv('Estimated cost', e(money(p.projected_savings.monthly)) + ' / month <span style="font-weight:400;color:#666">(estimate, not measured)</span>') +
+  kv('Risk', e(p.risk)) + kv('Expires', e(when(p.expires_at)) + ' <span style="font-weight:400;color:#666">(no answer = expires; never auto-approved)</span>') +
+  h('Why it was flagged') + `<ul style="margin:4px 0 0 18px;padding:0">${(p.why || []).map((x) => `<li>${e(x)}</li>`).join('')}</ul>` +
+  h('What this decision covers') + `<ul style="margin:4px 0 0 18px;padding:0">${targets}</ul>` +
+  (excluded ? `<div style="margin-top:6px;color:#666">Not included:</div><ul style="margin:2px 0 0 18px;padding:0">${excluded}</ul>` : '') +
+  h('If you approve') + `<div>Proposed: ${e(p.action)}.${tag ? '' : ' It is <b>not</b> applied by the system.'}</div><div>Rollback: ${e(p.rollback)}</div>` +
+  `<div style="margin-top:18px;padding-top:8px;border-top:1px solid #ddd;color:#888;font-size:11px;word-break:break-all">` +
+  `Technical details (checked by the API, the form cannot change them): ${e(p.case_id)} v${e(p.case_version)} · template ${e(p.template)} · policy ${e(p.policy_sha256)} · targets ${e(p.target_set_sha256)}</div></div>`;
 return [{ json: { formHtml: html, retry: !!$json.lastError } }];
 """}, [2000, 40])
     smsg = w.add("Build Slack approval message", "n8n-nodes-base.code", 2, {"jsCode": ESC + SM_JS + r"""
@@ -289,15 +301,14 @@ return [{ json: { formHtml: html, retry: !!$json.lastError } }];
 if ($json.retry) return [{ json: { slack_text: '' } }];
 const p = $('Check packet').first().json;
 const ids = p.targets.map((t) => `${esc(t.id)}${t.name ? ' (' + esc(t.name) + ')' : ''}`).join(', ');
-const lines = [`:bell: *Approval needed* \u2014 ${esc(p.owner)} \u00b7 tenant *${esc(p.tenant_id)}*`,
-  `case \`${esc(p.case_id)}\` v${esc(p.case_version)} \u00b7 proposed fix: ${esc(p.action)} \u00b7 risk: ${esc(p.risk)}`,
-  p.action_mode === 'tag_after_approval' ? '_Alert only: nothing has been changed yet. A human decides; the only action the system can ever take is a reversible tag._' : '_Alert only: nothing has been changed, and the system will not change anything. A human decides and fixes it by hand._', ''];
+const lines = [`:bell: *Approval needed* \u2014 ${esc(p.owner)} \u00b7 ${esc(p.tenant_id)}`,
+  `\`${esc(p.case_id)}\` \u00b7 risk: ${esc(p.risk)}`,
+  p.action_mode === 'tag_after_approval' ? '_Alert only: nothing has been changed yet. A human decides; the only action the system can ever take is a reversible tag._' : '_Alert only: the system changes nothing. A human decides and fixes it by hand._', '', ...brief];
 if (sm && sm.briefing) lines.push(sm.briefing, '');
-else lines.push(`projected saving: ${esc(p.projected_savings.monthly)} ${esc(p.projected_savings.currency)}/month (projected, not realized)`, `rollback: ${esc(p.rollback)}`, '');
-lines.push(`*Exact targets (${p.target_count}):* ${ids}`);
+else lines.push(`estimated saving: ${money(p.projected_savings.monthly)}/month (estimate, not measured)`, `rollback: ${esc(p.rollback)}`, '');
+lines.push(`*Target${p.target_count > 1 ? 's (' + p.target_count + ')' : ''}:* ${ids}`);
 if (p.excluded && p.excluded.length) lines.push('*Excluded:* ' + p.excluded.map((x) => `${esc(x.resource_id)} (${esc(x.reason)})`).join('; '));
-lines.push(`*Expires:* ${esc(p.expires_at)}`,
-  `<${$execution.resumeFormUrl}|Open the approval form> \u2014 needs approver ID + PIN. Silence expires it; nothing is ever auto-approved.`);
+lines.push(`*Decide:* <${$execution.resumeFormUrl}|Open the approval form> (approver ID + PIN) \u00b7 expires ${when(p.expires_at)} if nobody answers`);
 """ + SUMMARY_JS + r"""return [{ json: { slack_text: lines.join('\n') } }];
 """}, [2100, 40])
     wait = w.add("Wait for approver", "n8n-nodes-base.wait", 1.1, {
@@ -343,10 +354,12 @@ throw new Error('POST /approve failed with HTTP ' + code + ': ' + JSON.stringify
 """}, [3000, 120])
     w.link(hook, ver); w.link(ver, valid); w.link(valid, sq, 0); w.link(valid, r401, 1); w.link(sc, dup)
     w.link(dup, rdup, 0); w.link(dup, pkt, 1)
-    w.link(pkt, chkp, 0); w.link(pkt, fail, 1); w.link(chkp, pub, 0); w.link(chkp, fail, 1)
+    w.link(pkt, chkp, 0); w.link(pkt, fail, 1); w.link(chkp, fail, 1)
     w.link(pub, chkpub, 0); w.link(pub, fail, 1); w.link(chkpub, seen, 0); w.link(chkpub, fail, 1)
     summ = summary_node(w, "$node['Check packet'].json.case_id", [1900, 120])
-    w.link(seen_done, acc); w.link(acc, summ); w.link(summ, form); w.link(form, smsg)
+    # the summary is generated BEFORE the form link is published, so the link goes live right before the Wait starts (no dead-link window)
+    w.link(chkp, summ, 0); w.link(summ, pub)
+    w.link(seen_done, acc); w.link(acc, form); w.link(form, smsg)
     slack_chain(w, "Approval", smsg, wait, [2150, 120])      # best effort; then the Wait
     w.link(wait, cbk); w.link(cbk, post); w.link(post, retry)
     w.link(retry, seterr, 0); w.link(retry, res, 1); w.link(seterr, form)
@@ -370,11 +383,12 @@ const icon = { REFUSED: ':no_entry:', POLICY_INVALID: ':warning:', APPROVED: ':w
                VERIFIED: ':white_check_mark:', VERIFICATION_FAILED: ':rotating_light:', EXECUTION_FAILED: ':rotating_light:' }[ev.to_state] || ':information_source:';
 const needsAttention = ['REFUSED', 'POLICY_INVALID', 'EXPIRED', 'EXECUTION_FAILED', 'VERIFICATION_FAILED'].includes(ev.to_state);
 const s = ev.summary || {}, d = ev.detail || {};
-const lines = [`${icon} *${esc(ev.to_state)}* \u2014 ${esc(s.workload)} (${esc(ev.tenant_id)})`,
-  `case \`${esc(ev.case_id)}\` \u00b7 ${esc(ev.from_state)} \u2192 ${esc(ev.to_state)} \u00b7 by ${esc(ev.actor)}`,
-  '_Alert only: this system investigates and informs; people decide and fix._'];
-if (ev.to_state === 'APPROVED' && ev.action_mode !== 'tag_after_approval') lines.push('human decision recorded; the system made NO change, the owner fixes it by hand');
-if (s.owner) lines.push(`owner: ${esc(s.owner)} \u00b7 risk: ${esc(s.risk)} \u00b7 projected: ${esc(s.projected_monthly)} ${esc(s.currency)}/month (projected, not realized)`);
+const lines = [`${icon} *${esc(ev.to_state)}* \u2014 ${esc(s.workload)} \u00b7 ${esc(ev.tenant_id)}`,
+  `\`${esc(ev.case_id)}\` \u00b7 ${esc(ev.from_state)} \u2192 ${esc(ev.to_state)} \u00b7 by ${esc(ev.actor)}`,
+  '_Alert only: the system informs; people decide and fix._'];
+if (ev.to_state === 'APPROVED' && ev.action_mode !== 'tag_after_approval') lines.push('Decision recorded. The system made NO change; the owner fixes it by hand.');
+if (s.owner) lines.push(`owner: ${esc(s.owner)} \u00b7 risk: ${esc(s.risk)} \u00b7 estimate: ${money(s.projected_monthly)}/month`);
+lines.push('', ...brief);
 if (d.reasons && d.reasons.length) lines.push('reasons: ' + d.reasons.map(esc).join('; '));
 if (d.note) lines.push('note: ' + esc(d.note));
 if (d.matched_ids && d.matched_ids.length) lines.push('targets: ' + d.matched_ids.map(esc).join(', '));
@@ -386,8 +400,15 @@ if (needsAttention && sm && sm.briefing) lines.push('', sm.briefing);
     ok = w.add("Respond 200", "n8n-nodes-base.respondToWebhook", 1.1, respond(200, '={{ JSON.stringify({ ok: true, handled: $json.handled }) }}'), [2300, 40])
     w.link(hook, ver); w.link(ver, valid); w.link(valid, sq, 0); w.link(valid, r401, 1); w.link(sc, dup)
     summ = summary_node(w, "$node['Verify signature'].json.event.case_id", [1000, 120])
-    w.link(dup, rdup, 0); w.link(dup, summ, 1); w.link(summ, msg)
+    # healthy-tenant digests carry their own text and have no case: they skip the case-summary call entirely
+    isdig = w.add("Digest event?", "n8n-nodes-base.if", 2.2, if_true("={{ $node['Verify signature'].json.event.event_type === 'digest.healthy' }}"), [900, 60])
+    dmsg = w.add("Build all-clear message", "n8n-nodes-base.code", 2, {"jsCode": r"""
+const ev = $('Verify signature').first().json.event;
+return [{ json: { slack_text: String(ev.text || '') + '\n\n_ref ' + ev.event_id + '_' } }];
+"""}, [1100, 220])
+    w.link(dup, rdup, 0); w.link(dup, isdig, 1); w.link(isdig, dmsg, 0); w.link(isdig, summ, 1); w.link(summ, msg)
     slack_chain(w, "Outcome", msg, seen, [1300, 40], fail)
+    slack_chain(w, "AllClear", dmsg, seen, [1300, 220], fail)
     w.link(seen_done, ok)
     w.save()
 

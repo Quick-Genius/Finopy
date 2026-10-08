@@ -1,0 +1,44 @@
+== HEALTHY PROFILE: nothing is wrong, so the only output is an 'all clear' cost digest per tenant (no cases, no recommendations)
+  [PASS] seed profile is healthy  (SEED_PROFILE=healthy (run ./scripts/reset.sh healthy first))
+  [PASS] run-now answers HTTP 200  (HTTP 200)
+  [PASS] one 'all clear' digest per tenant was created and delivered through n8n
+  [PASS] no cases exist for either tenant
+  [PASS] no alert, policy, approval or execution anywhere
+  [PASS] LocalStack untouched
+  [PASS] every queued event was delivered (outbox empty)
+   Slack stand-in received 2 message(s):
+     --- :white_check_mark: *Cost check: all clear* — payments
+         _No anomalies, no idle or orphaned resources, spend within budget. Nothing to do._
+         
+         *Costs*
+         • Last 3 days: $315.79 (expected about $303.28)
+         • Last 30 days: $3,041.74 of a $3,800.00 monthly budget (80%)
+         • Top services (30 days): AmazonEC2 $1,335.00, AmazonRDS $1,080.39, AWSLambda $626.35
+         
+         *Stats*
+         ```
+         cost/day (14d)  ██▁▁▇█▇█▇▁▂███  $105.93 -> $105.49
+         budget (month)  ██████████████ $3,800.00
+         30 days spent   ███████████░░░ $3,041.74
+         ```
+         
+         _ref evt_c11213b2df2fead6f6a2_
+     --- :white_check_mark: *Cost check: all clear* — analytics
+         _No anomalies, no idle or orphaned resources, spend within budget. Nothing to do._
+         
+         *Costs*
+         • Last 3 days: $104.24 (expected about $98.76)
+         • Last 30 days: $991.33 of a $1,240.00 monthly budget (80%)
+         • Top services (30 days): AmazonEC2 $594.08, AmazonS3 $397.25
+         
+         *Stats*
+         ```
+         cost/day (14d)  █▇▂▁██▇█▇▁▁█▇▇  $35.12 -> $34.59
+         budget (month)  ██████████████ $1,240.00
+         30 days spent   ███████████░░░ $991.33
+         ```
+         
+         _ref evt_0a77b90709446b789316_
+  [PASS] Slack got exactly two messages: an all-clear for each tenant
+  [PASS] the digests contain costs and a budget chart, and NO recommendations
+  [PASS] 30-day spend is not $0.00 and is not an empty bar (regression: RLS hid rows outside the tx)

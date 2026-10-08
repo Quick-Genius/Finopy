@@ -1,0 +1,9 @@
+== outbox: n8n DOWN during analysis -> nothing lost, delivered later, no duplicates
+  [PASS] analysis committed while n8n is down  (HTTP 200)
+  [PASS] cases exist (not rolled back by n8n downtime)
+  [PASS] events are queued and retrying  (6,3,6)
+  [PASS] no case advanced without n8n
+  [PASS] after n8n returns the backlog is delivered and the case reaches PENDING
+  [PASS] the backlog drains completely (every queued event is eventually delivered)
+   cases,policies(2 valid + 1 refused),approvals,cases-with-duplicate-policy,undelivered-events = 6|3|2|0|0
+  [PASS] retries created no duplicate cases/policies/approvals; outbox fully drained  (6|3|2|0|0)
