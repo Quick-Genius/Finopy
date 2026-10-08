@@ -134,12 +134,17 @@ def _decide(c, req: CallbackIn, a, case, tenant, now) -> dict:
               (now, req.actor_id, role, a["approval_id"]))
     transition(c, tenant, cid, "PENDING", "APPROVED", req.actor_id, detail={"approval_id": a["approval_id"], "role": role,
               "policy_sha256": a["policy_sha256"], "target_set_sha256": a["target_set_sha256"]})
+    if config.ACTION_MODE != "tag_after_approval":
+        # alert-only: the human decision is recorded for audit; the system changes nothing and no execution is created.
+        audit(c, tenant, cid, "approval.recorded_no_action", "system", version=case["current_version"],
+              detail={"approval_id": a["approval_id"], "mode": "alert_only", "note": "a human owns the fix; the system made no change"})
+        return {"outcome": "approved", "state": "APPROVED", "approval_id": a["approval_id"], "execution_id": None, "action_mode": "alert_only"}
     xid = "exe_" + uuid.uuid4().hex[:12]
     c.execute("""insert into executions (execution_id, case_id, tenant_id, approval_id, status, policy_id, policy_sha256, target_set_sha256)
                  values (%s,%s,%s,%s,'queued',%s,%s,%s)""",
               (xid, cid, tenant, a["approval_id"], a["policy_id"], a["policy_sha256"], a["target_set_sha256"]))
     audit(c, tenant, cid, "execution.queued", "system", version=case["current_version"], detail={"execution_id": xid})
-    return {"outcome": "approved", "state": "APPROVED", "approval_id": a["approval_id"], "execution_id": xid}
+    return {"outcome": "approved", "state": "APPROVED", "approval_id": a["approval_id"], "execution_id": xid, "action_mode": "tag_after_approval"}
 
 
 def _close(c, a, case, tenant, status, to_state, actor, role, note):

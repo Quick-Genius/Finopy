@@ -1,0 +1,499 @@
+ Container finops-sentinel-cq-runner-1 Stopping 
+ Container finops-sentinel-dashboard-1 Stopping 
+ Container finops-sentinel-n8n-1 Stopping 
+ Container finops-sentinel-seed-1 Stopping 
+ Container finops-sentinel-seed-1 Stopped 
+ Container finops-sentinel-seed-1 Removing 
+ Container finops-sentinel-seed-1 Removed 
+ Container finops-sentinel-dashboard-1 Stopped 
+ Container finops-sentinel-dashboard-1 Removing 
+ Container finops-sentinel-dashboard-1 Removed 
+ Container finops-sentinel-api-1 Stopping 
+ Container finops-sentinel-cq-runner-1 Stopped 
+ Container finops-sentinel-cq-runner-1 Removing 
+ Container finops-sentinel-cq-runner-1 Removed 
+ Container finops-sentinel-n8n-1 Stopped 
+ Container finops-sentinel-n8n-1 Removing 
+ Container finops-sentinel-n8n-1 Removed 
+ Container finops-sentinel-api-1 Stopped 
+ Container finops-sentinel-api-1 Removing 
+ Container finops-sentinel-api-1 Removed 
+ Container finops-sentinel-runner-1 Stopping 
+ Container finops-sentinel-migrate-1 Stopping 
+ Container finops-sentinel-migrate-1 Stopped 
+ Container finops-sentinel-migrate-1 Removing 
+ Container finops-sentinel-migrate-1 Removed 
+ Container finops-sentinel-postgres-1 Stopping 
+ Container finops-sentinel-postgres-1 Stopped 
+ Container finops-sentinel-postgres-1 Removing 
+ Container finops-sentinel-postgres-1 Removed 
+ Container finops-sentinel-runner-1 Stopped 
+ Container finops-sentinel-runner-1 Removing 
+ Container finops-sentinel-runner-1 Removed 
+ Container finops-sentinel-localstack-1 Stopping 
+ Container finops-sentinel-localstack-1 Stopped 
+ Container finops-sentinel-localstack-1 Removing 
+ Container finops-sentinel-localstack-1 Removed 
+ Network finops-sentinel_default Removing 
+ Network finops-sentinel_default Removed 
+ Image finops-sentinel-migrate Building 
+ Image finops-sentinel-runner Building 
+ Image finops-sentinel-dashboard Building 
+ Image finops-sentinel-cq-runner Building 
+ Image finops-sentinel-seed Building 
+ Image finops-sentinel-api Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 3.35kB done
+#1 DONE 0.0s
+
+#2 [dashboard internal] load build definition from Dockerfile
+#2 transferring dockerfile: 283B done
+#2 DONE 0.1s
+
+#3 [runner internal] load build definition from Dockerfile
+#3 transferring dockerfile: 564B done
+#3 DONE 0.1s
+
+#4 [api internal] load build definition from Dockerfile
+#4 transferring dockerfile: 465B done
+#4 DONE 0.1s
+
+#5 [seed internal] load build definition from Dockerfile
+#5 transferring dockerfile: 244B done
+#5 DONE 0.1s
+
+#6 [cq-runner internal] load build definition from Dockerfile
+#6 transferring dockerfile: 1.24kB done
+#6 DONE 0.1s
+
+#7 [cq-runner internal] load metadata for docker.io/library/python:3.12-slim
+#7 DONE 0.1s
+
+#8 [migrate internal] load .dockerignore
+#8 transferring context: 2B done
+#8 DONE 0.0s
+
+#9 [seed 1/8] FROM docker.io/library/python:3.12-slim@sha256:05cda9777409a9c3ffddd94a4c476b79f0769a0b4857f0c7ed9226b6800b0d6f
+#9 resolve docker.io/library/python:3.12-slim@sha256:05cda9777409a9c3ffddd94a4c476b79f0769a0b4857f0c7ed9226b6800b0d6f 0.0s done
+#9 DONE 0.0s
+
+#10 [seed internal] load build context
+#10 transferring context: 10.15kB done
+#10 DONE 0.1s
+
+#11 [migrate internal] load build context
+#11 transferring context: 1.17kB done
+#11 DONE 0.0s
+
+#12 [runner internal] load build context
+#12 transferring context: 108B done
+#12 DONE 0.1s
+
+#13 [seed 2/4] RUN pip install --no-cache-dir "boto3>=1.35,<2" "psycopg[binary]>=3.2,<4"
+#13 CACHED
+
+#14 [seed 3/4] WORKDIR /seed
+#14 CACHED
+
+#15 [seed 4/4] COPY seed/seed.py .
+#15 CACHED
+
+#16 [runner 5/6] COPY runner/server.py .
+#16 CACHED
+
+#17 [runner 4/6] RUN pip install --no-cache-dir -r requirements.txt && pip freeze > /srv/requirements.lock
+#17 CACHED
+
+#18 [runner 3/6] COPY runner/requirements.lock ./requirements.txt
+#18 CACHED
+
+#19 [runner 6/6] RUN useradd -m -u 10002 runner && mkdir /data && chown runner /data
+#19 CACHED
+
+#20 [migrate 4/8] RUN pip install --no-cache-dir -r requirements.txt && pip freeze > /srv/requirements.lock
+#20 CACHED
+
+#21 [migrate 6/8] COPY api/tests ./tests
+#21 CACHED
+
+#22 [migrate 3/8] COPY api/requirements.lock ./requirements.txt
+#22 CACHED
+
+#23 [migrate 7/8] COPY db/migrations /db/migrations
+#23 CACHED
+
+#24 [migrate 2/8] WORKDIR /srv
+#24 CACHED
+
+#25 [migrate 5/8] COPY api/app ./app
+#25 CACHED
+
+#26 [migrate 8/8] RUN useradd -r -u 10001 sentinel
+#26 CACHED
+
+#27 [auth] library/golang:pull token for registry-1.docker.io
+#27 DONE 0.0s
+
+#28 [auth] library/nginx:pull token for registry-1.docker.io
+#28 DONE 0.0s
+
+#29 [auth] library/node:pull token for registry-1.docker.io
+#29 DONE 0.0s
+
+#30 [runner] exporting to image
+#30 exporting layers done
+#30 exporting manifest sha256:fb66a577ed9e1164c5db2d92d6f7c73f1c10a8d6db04938120142167fb38b2e0 done
+#30 exporting config sha256:28fb0a7e25266a7bfcf7de6be3e654e10fc344525e03e0f507ea0cc85c15542e 0.0s done
+#30 exporting attestation manifest sha256:64bebc86878619da56819af44061b69b09676becca137e246916cefc0a72deb0
+#30 exporting attestation manifest sha256:64bebc86878619da56819af44061b69b09676becca137e246916cefc0a72deb0 0.1s done
+#30 exporting manifest list sha256:47b3bd4bf886fe488ba5188e2bc52dfe10fbb71a55274f4d4f4f4e860aa27e56
+#30 ...
+
+#31 [seed] exporting to image
+#31 exporting layers done
+#31 exporting manifest sha256:b7d2fa01f70a8ce978c98f544b18bc3e45f592b9b61ecf604a3dbbb513ce3b7e done
+#31 exporting config sha256:0a2774ba34fd19a12e249eb4796a837fd9ba9999958e442d347f17c3b82f6dc6 done
+#31 exporting attestation manifest sha256:29379fb45a08c12a29dabda7412af3a314a4cde8dbdaa7849c38096f1f148511 0.1s done
+#31 exporting manifest list sha256:f90c120845998442b83d49e04bfbb179334be22fa6316707bb776e3240e7ddfc 0.0s done
+#31 naming to docker.io/library/finops-sentinel-seed:latest 0.0s done
+#31 unpacking to docker.io/library/finops-sentinel-seed:latest 0.0s done
+#31 DONE 0.3s
+
+#32 [api] exporting to image
+#32 exporting layers done
+#32 exporting manifest sha256:94588cdc9232aba09d7a4499100065fb3c5a22f19c1a86a1b17eabaf4c6b3e43 0.0s done
+#32 exporting config sha256:45feebc972f584cf49da02bd25e8bb10e2463ff040f70d29cbb39c80704f53b8 0.0s done
+#32 exporting attestation manifest sha256:e07ce7c4f53029568bf490c9b7f83f123ebb31a8579bd2eff1e301139112ac7e 0.1s done
+#32 exporting manifest list sha256:6168e22999715def91b22c88292c2a78ae3193f2771254940f39e70666bbdd7d 0.0s done
+#32 naming to docker.io/library/finops-sentinel-api:latest done
+#32 unpacking to docker.io/library/finops-sentinel-api:latest done
+#32 DONE 0.3s
+
+#30 [runner] exporting to image
+#30 exporting manifest list sha256:47b3bd4bf886fe488ba5188e2bc52dfe10fbb71a55274f4d4f4f4e860aa27e56 0.0s done
+#30 naming to docker.io/library/finops-sentinel-runner:latest done
+#30 unpacking to docker.io/library/finops-sentinel-runner:latest done
+#30 DONE 0.3s
+
+#33 [migrate] exporting to image
+#33 exporting layers done
+#33 exporting manifest sha256:3fde2df062786f5488f5dfd5c1e708081708093ce34a06a07a3acd557b28d69d 0.0s done
+#33 exporting config sha256:b9580c4158c9c317fc6ecc9458dc9e386be96a2853b7de47092ddc527b47bb1d 0.0s done
+#33 exporting attestation manifest sha256:ec452df620bcedc5cc6420638c0c23aba2d8ddf57ca20298549c40bc51fbe966 0.1s done
+#33 exporting manifest list sha256:60369aea79575c959694e4d21a9c3ee5f05e1032b6daade21c785baa2dc283d6 0.0s done
+#33 naming to docker.io/library/finops-sentinel-migrate:latest done
+#33 unpacking to docker.io/library/finops-sentinel-migrate:latest done
+#33 DONE 0.3s
+
+#34 [seed] resolving provenance for metadata file
+#34 DONE 0.1s
+
+#35 [runner] resolving provenance for metadata file
+#35 DONE 0.1s
+
+#36 [migrate] resolving provenance for metadata file
+#36 DONE 0.1s
+
+#37 [api] resolving provenance for metadata file
+#37 DONE 0.0s
+
+#38 [cq-runner internal] load metadata for docker.io/library/golang:1.27
+#38 ...
+
+#39 [cq-runner internal] load metadata for ghcr.io/cloudquery/cloudquery:6.45.0
+#39 DONE 1.7s
+
+#40 [dashboard internal] load metadata for docker.io/library/nginx:1.27-alpine
+#40 DONE 2.1s
+
+#41 [dashboard internal] load metadata for docker.io/library/node:22-alpine
+#41 DONE 2.1s
+
+#42 [dashboard internal] load .dockerignore
+#42 transferring context: 58B done
+#42 DONE 0.0s
+
+#38 [cq-runner internal] load metadata for docker.io/library/golang:1.27
+#38 DONE 2.1s
+
+#8 [cq-runner internal] load .dockerignore
+#8 CACHED
+
+#43 [dashboard stage-1 1/3] FROM docker.io/library/nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+#43 resolve docker.io/library/nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 0.0s done
+#43 DONE 0.0s
+
+#44 [cq-runner pgdest 1/4] FROM docker.io/library/golang:1.27@sha256:e432b43af23a9328d56a7c499be0476810aa344acbcf65fc7c455d4ff5a40602
+#44 resolve docker.io/library/golang:1.27@sha256:e432b43af23a9328d56a7c499be0476810aa344acbcf65fc7c455d4ff5a40602 0.0s done
+#44 DONE 0.0s
+
+#9 [cq-runner stage-2 1/8] FROM docker.io/library/python:3.12-slim@sha256:05cda9777409a9c3ffddd94a4c476b79f0769a0b4857f0c7ed9226b6800b0d6f
+#9 resolve docker.io/library/python:3.12-slim@sha256:05cda9777409a9c3ffddd94a4c476b79f0769a0b4857f0c7ed9226b6800b0d6f 0.0s done
+#9 DONE 0.1s
+
+#45 [cq-runner cq 1/1] FROM ghcr.io/cloudquery/cloudquery:6.45.0@sha256:1102d0b4eb4358b0a306ffc99aca4bb6a5eb10eb3f6f0cb2edcd6f37132f23f1
+#45 resolve ghcr.io/cloudquery/cloudquery:6.45.0@sha256:1102d0b4eb4358b0a306ffc99aca4bb6a5eb10eb3f6f0cb2edcd6f37132f23f1 0.0s done
+#45 DONE 0.0s
+
+#46 [dashboard build 1/6] FROM docker.io/library/node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+#46 resolve docker.io/library/node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 0.0s done
+#46 DONE 0.0s
+
+#47 [dashboard internal] load build context
+#47 transferring context: 446B done
+#47 DONE 0.0s
+
+#48 [cq-runner internal] load build context
+#48 transferring context: 2.65kB 0.0s done
+#48 DONE 0.0s
+
+#49 [dashboard build 5/6] COPY . .
+#49 CACHED
+
+#50 [dashboard build 3/6] COPY package*.json ./
+#50 CACHED
+
+#51 [dashboard build 2/6] WORKDIR /app
+#51 CACHED
+
+#52 [dashboard stage-1 2/3] COPY nginx.conf /etc/nginx/conf.d/default.conf
+#52 CACHED
+
+#53 [dashboard build 4/6] RUN npm ci --no-audit --no-fund
+#53 CACHED
+
+#54 [dashboard build 6/6] RUN npm run build
+#54 CACHED
+
+#55 [dashboard stage-1 3/3] COPY --from=build /app/dist /usr/share/nginx/html
+#55 CACHED
+
+#56 [cq-runner pgdest 4/4] RUN CGO_ENABLED=0 go build -o /cq-destination-postgresql .
+#56 CACHED
+
+#57 [cq-runner pgdest 2/4] RUN git clone --depth 1 --branch plugins-destination-postgresql-v8.17.0 https://github.com/cloudquery/cloudquery /src
+#57 CACHED
+
+#58 [cq-runner stage-2 5/8] WORKDIR /srv
+#58 CACHED
+
+#59 [cq-runner stage-2 7/8] COPY cq/spec.yml /spec/spec.yml
+#59 CACHED
+
+#60 [cq-runner stage-2 2/8] RUN pip install --no-cache-dir "fastapi>=0.115,<1" "uvicorn[standard]>=0.30,<1"
+#60 CACHED
+
+#61 [cq-runner pgdest 3/4] WORKDIR /src/plugins/destination/postgresql
+#61 CACHED
+
+#62 [cq-runner stage-2 3/8] COPY --from=cq /app/cloudquery /usr/local/bin/cloudquery
+#62 CACHED
+
+#63 [cq-runner stage-2 6/8] COPY cq/server.py .
+#63 CACHED
+
+#64 [cq-runner stage-2 4/8] COPY --from=pgdest /cq-destination-postgresql /usr/local/bin/cq-destination-postgresql
+#64 CACHED
+
+#65 [cq-runner stage-2 8/8] RUN useradd -m -u 10003 cq && mkdir -p /home/cq/.cq && chown -R cq:cq /home/cq/.cq
+#65 CACHED
+
+#66 [dashboard] exporting to image
+#66 exporting layers done
+#66 exporting manifest sha256:5f6ea735760d896bfacf5e71b5b96e71407c86313e472f980c99c0df92e7c821 done
+#66 exporting config sha256:b3e66c263f5c78a04702c3a7214c282f88af5681eefca6e764e47279fd27f8a1 done
+#66 exporting attestation manifest sha256:ae1a6bb66c68c3dca299cb83ac9f52c79c3ff73c8d321bdf780edff21598cd55 0.0s done
+#66 exporting manifest list sha256:0cbf148018bfecd91d55f689f8000c1b897ddd7cbed0451706c7fff6b7eb5b99 0.0s done
+#66 naming to docker.io/library/finops-sentinel-dashboard:latest done
+#66 unpacking to docker.io/library/finops-sentinel-dashboard:latest done
+#66 DONE 0.1s
+
+#67 [cq-runner] exporting to image
+#67 exporting layers done
+#67 exporting manifest sha256:19d47d6fd5d5ce9c0cf35e4a422c9e81f7da659f00416e0d71c4058904b70002 done
+#67 exporting config sha256:ac267cfa5a4d2041b2f0c0cd44dcb985247073598df1a68b3779129f7a97904b done
+#67 exporting attestation manifest sha256:edc7dbeaf5031c627cc6c4507c189d0ab704ed4c28c97adae19c08fc0d0736a5 0.0s done
+#67 exporting manifest list sha256:53a949c775a9837f50e0a3d9495b5df084067c46235660e7ade91963cfc728d8 0.0s done
+#67 naming to docker.io/library/finops-sentinel-cq-runner:latest done
+#67 unpacking to docker.io/library/finops-sentinel-cq-runner:latest 0.0s done
+#67 DONE 0.1s
+
+#68 [dashboard] resolving provenance for metadata file
+#68 DONE 0.0s
+
+#69 [cq-runner] resolving provenance for metadata file
+#69 DONE 0.0s
+ Image finops-sentinel-migrate Built 
+ Image finops-sentinel-runner Built 
+ Image finops-sentinel-api Built 
+ Image finops-sentinel-dashboard Built 
+ Image finops-sentinel-seed Built 
+ Image finops-sentinel-cq-runner Built 
+ Network finops-sentinel_default Creating 
+ Network finops-sentinel_default Created 
+ Volume finops-sentinel_n8n_data Creating 
+ Volume finops-sentinel_n8n_data Created 
+ Volume finops-sentinel_pgdata Creating 
+ Volume finops-sentinel_pgdata Created 
+ Volume finops-sentinel_runner_state Creating 
+ Volume finops-sentinel_runner_state Created 
+ Container finops-sentinel-postgres-1 Creating 
+ Container finops-sentinel-localstack-1 Creating 
+ Container finops-sentinel-postgres-1 Created 
+ Container finops-sentinel-migrate-1 Creating 
+ Container finops-sentinel-n8n-1 Creating 
+ Container finops-sentinel-localstack-1 Created 
+ Container finops-sentinel-cq-runner-1 Creating 
+ Container finops-sentinel-runner-1 Creating 
+ Container finops-sentinel-runner-1 Created 
+ Container finops-sentinel-migrate-1 Created 
+ Container finops-sentinel-api-1 Creating 
+ Container finops-sentinel-seed-1 Creating 
+ Container finops-sentinel-n8n-1 Created 
+ Container finops-sentinel-cq-runner-1 Created 
+ Container finops-sentinel-api-1 Created 
+ Container finops-sentinel-dashboard-1 Creating 
+ Container finops-sentinel-seed-1 Created 
+ Container finops-sentinel-dashboard-1 Created 
+ Container finops-sentinel-localstack-1 Starting 
+ Container finops-sentinel-postgres-1 Starting 
+ Container finops-sentinel-localstack-1 Started 
+ Container finops-sentinel-localstack-1 Waiting 
+ Container finops-sentinel-postgres-1 Started 
+ Container finops-sentinel-postgres-1 Waiting 
+ Container finops-sentinel-postgres-1 Waiting 
+ Container finops-sentinel-postgres-1 Waiting 
+ Container finops-sentinel-localstack-1 Waiting 
+ Container finops-sentinel-postgres-1 Healthy 
+ Container finops-sentinel-postgres-1 Healthy 
+ Container finops-sentinel-migrate-1 Starting 
+ Container finops-sentinel-n8n-1 Starting 
+ Container finops-sentinel-postgres-1 Healthy 
+ Container finops-sentinel-n8n-1 Started 
+ Container finops-sentinel-migrate-1 Started 
+ Container finops-sentinel-localstack-1 Waiting 
+ Container finops-sentinel-migrate-1 Waiting 
+ Container finops-sentinel-migrate-1 Exited 
+ Container finops-sentinel-localstack-1 Healthy 
+ Container finops-sentinel-seed-1 Starting 
+ Container finops-sentinel-seed-1 Started 
+ Container finops-sentinel-localstack-1 Healthy 
+ Container finops-sentinel-runner-1 Starting 
+ Container finops-sentinel-localstack-1 Healthy 
+ Container finops-sentinel-cq-runner-1 Starting 
+ Container finops-sentinel-runner-1 Started 
+ Container finops-sentinel-migrate-1 Waiting 
+ Container finops-sentinel-runner-1 Waiting 
+ Container finops-sentinel-cq-runner-1 Started 
+ Container finops-sentinel-migrate-1 Exited 
+ Container finops-sentinel-runner-1 Healthy 
+ Container finops-sentinel-api-1 Starting 
+ Container finops-sentinel-api-1 Started 
+ Container finops-sentinel-api-1 Waiting 
+ Container finops-sentinel-api-1 Healthy 
+ Container finops-sentinel-dashboard-1 Starting 
+ Container finops-sentinel-dashboard-1 Started 
+waiting for services..
+{"api":"ok","time":"2026-10-08T19:06:22.678642+00:00","database":"ok","runner":"ok","workers":{"outbox_dispatcher":"alive","execution_worker":"alive","expiry_sweeper":"alive"},"outbox_pending":0,"executions_queued":0,"llm":"alibaba"}
+dashboard http://localhost:13000   api http://localhost:18000/docs   n8n http://localhost:15678 (demo@sentinel.local / Sentinel-Demo-1)
+== 1. trigger analysis through n8n (CloudQuery sync -> API analysis -> outbox -> n8n intake -> Custodian dry-run)
+  [PASS] n8n manual webhook accepted  (HTTP 202)
+  [PASS] both approval-ready cases reached PENDING with an n8n form  (27s)
+  [PASS] seeded event -> approval-ready under the 5-minute target  (27s)
+
+== 2. scenario outcomes
+    case_payments_batch-dev-idle-ec2                     PENDING
+    case_payments_checkout-api-spend-anomaly             DISMISSED
+    case_payments_dr-standby-idle-ec2                    REFUSED
+    case_payments_shared-ingest-idle-ec2                 INVESTIGATED
+    case_analytics_notebooks-unattached-ebs              PENDING
+  [PASS] expected Payments spike is DISMISSED as legitimate (not waste)
+  [PASS] normal RDS baseline raised no case
+  [PASS] protected production resource REFUSED before approval
+  [PASS] ambiguous-owner case held as needs_review (no dry-run, no approval)
+    refusal reasons: ['no executable targets remain after guards (1 protected excluded)'] | excluded: [{'reason': 'protected: tag Protected or Environment=production', 'resource_id': 'i-169a2a8df2d52170b'}]
+  [PASS] ambiguous case: owner is None, never invented  (conflicting owners: ['payments-platform', 'payments-risk'])
+
+== 3. exact dry-run evidence (Payments safe-action candidate)
+    custodian 0.9.53 dry-run exit 0  targets ['i-85cbefbd4ab8b0598', 'i-fd5b1908136cb62fa']
+    policy sha256     178edb66bc707c6186d19c641e6d942e8174a52246bb7220582066130ba3c76c
+    target-set sha256 030b802e9f7724e8daa4a6232cb99a85913fd8222865e6f347a3d92fefa48d80
+    projected saving  420.0000 USD/month (projected; realized = not measured)
+  [PASS] exactly two sorted targets, hashes bound to the approval
+  [PASS] policy is a deterministic template (mark-for-op, no delete/terminate)
+  [PASS] LocalStack BEFORE: 6 instances seen, none carries finops_mark  (6 instances)
+
+== 4. cross-tenant denial (Payments identity vs the Analytics case)
+  [PASS] Payments cannot read the Analytics case by guessing its id
+  [PASS] Payments cannot read its audit trail
+  [PASS] Payments cannot dry-run / act on it
+  [PASS] validly-signed n8n callback naming a Payments approver for an Analytics approval is refused  (HTTP 403 {'error': "actor is not a member of the case's tenant"})
+  [PASS] human bearer token cannot call the callback endpoint
+  [PASS] bad signature rejected
+  [PASS] stale timestamp rejected (replay window)
+  [PASS] Analytics case still PENDING after all forged attempts
+
+== 4b. n8n-side failures must answer 5xx (outbox retries) and must NOT be marked as handled
+  [PASS] intake: API fetch fails -> HTTP 500, not a silent 200  (HTTP 500)
+  [PASS] intake: the same event is retried (not swallowed as a duplicate)  (HTTP 500)
+  [PASS] approval: packet fetch fails -> HTTP 500 and the event stays retryable  (HTTP 500/500)
+  [PASS] signed event with a path-traversal case_id is rejected before any API call  (HTTP 401 {'error': 'malformed identifier'})
+  [PASS] API refuses malformed path /cases/bad.id  (HTTP 422)
+  [PASS] API refuses malformed path /cases/case_x%20y  (HTTP 422)
+  [PASS] API refuses malformed path /approvals/apr_XYZ  (HTTP 422)
+  [PASS] API refuses malformed path /approvals/..%2Fcases  (HTTP 404)
+  [PASS] intake: first delivery of a digest-only event is handled (200, no action)  (HTTP 200 {'ok': True, 'handled': True})
+  [PASS] intake: sequential re-delivery of the same event_id is a duplicate no-op  (HTTP 200 {'duplicate': True})
+
+== 5. human approval through the n8n form (first with a WRONG pin)
+  [PASS] wrong PIN does not approve  (form HTTP 200)
+  [PASS] refusal recorded in the tenant audit trail  (['actor identity proof failed'])
+   now the real approver submits the same form
+  [PASS] form accepted  (HTTP 200)
+  [PASS] case reached VERIFIED  (VERIFIED)
+    execution exe_48d05a7a4926 status=succeeded exit=0 matched=['i-85cbefbd4ab8b0598', 'i-fd5b1908136cb62fa']
+    approver=payments-approver role=approver decided=2026-10-08T19:06:56.310338+00:00
+    verify i-85cbefbd4ab8b0598: finops_mark = 'Resource does not meet policy: stop@2026/10/10' (changed=True)
+    verify i-fd5b1908136cb62fa: finops_mark = 'Resource does not meet policy: stop@2026/10/10' (changed=True)
+  [PASS] runner matched exactly the approved targets, exit 0
+
+== 6. live resource state in LocalStack AFTER the action (independent read)
+    i-85cbefbd4ab8b0598 payments-batch-dev-1     running  finops_mark=Resource does not meet policy: stop@2026/10/10
+    i-fd5b1908136cb62fa payments-batch-dev-2     running  finops_mark=Resource does not meet policy: stop@2026/10/10
+    i-169a2a8df2d52170b payments-dr-standby      running  finops_mark=None
+    i-00b6d2d7abc55d1a2 payments-shared-ingest   running  finops_mark=None
+    i-e0ecfb9c543844f8f payments-api-1           running  finops_mark=None
+    i-406973466bbb8ea9a analytics-etl-1          running  finops_mark=None
+  [PASS] exactly the two approved instances are marked, and still running (non-destructive)
+  [PASS] protected DR instance untouched
+
+== 7. duplicate callback / replay does nothing
+  [PASS] same idempotency key returns the earlier result, flagged replayed  (HTTP 200 {'state': 'APPROVED', 'outcome': 'approved', 'approval_id': 'apr_dea4788bd298', 'execution_id': 'exe_48d05a7a4926', 'replayed': True})
+  [PASS] fresh key on an already-decided approval is refused (no second execution)  (HTTP 409 approval is approved and case is VERIFIED; nothing to decide)
+  [PASS] re-clicking the n8n form is a no-op  (form HTTP 200)
+  [PASS] LocalStack unchanged by the duplicates
+  [PASS] database holds exactly ONE execution for the case  (1)
+
+== 8. rejection closes the gate (Analytics)
+  [PASS] Analytics case REJECTED, nothing executed
+
+== 9. tenant-scoped audit export
+  [PASS] Payments export contains only Payments events  (24 events)
+
+== 10. Slack: skipped (no slack-mock running; set SLACK_WEBHOOK_URL to test)
+
+   timeline (batch-dev):
+     19:06:28.854 case.created                           -> NEW          system:analysis:run_d03d67840572
+     19:06:28.855 state.investigated         NEW         -> INVESTIGATED system:analysis:run_d03d67840572
+     19:06:33.682 state.dry_run              INVESTIGATED-> DRY_RUN      n8n-automation
+     19:06:33.683 state.pending              DRY_RUN     -> PENDING      n8n-automation
+     19:06:44.634 approval.form_published                ->              n8n-automation
+     19:06:47.298 summary.generated                      ->              n8n-automation
+     19:06:52.121 approval.callback_refused              ->              payments-approver
+     19:06:56.320 state.approved             PENDING     -> APPROVED     payments-approver
+     19:06:56.323 execution.queued                       ->              system
+     19:06:59.104 state.executed             APPROVED    -> EXECUTED     system:executor
+     19:06:59.143 state.verified             EXECUTED    -> VERIFIED     system:verifier
+     19:07:00.095 summary.generated                      ->              n8n-automation
+
+RESULT: ALL CHECKS PASSED

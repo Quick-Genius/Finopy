@@ -1,0 +1,624 @@
+{
+  "id": "sentinelNotify00001",
+  "name": "Sentinel notify",
+  "nodes": [
+    {
+      "id": "sentinelNotify00001-0",
+      "name": "State change event",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sentinel-notify",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "webhookId": "sentinel-notify"
+    },
+    {
+      "id": "sentinelNotify00001-1",
+      "name": "Verify signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        0
+      ],
+      "parameters": {
+        "jsCode": "\n// Verify HMAC over the RAW body + timestamp window. Never throws: returns a verdict.\nconst crypto = require('crypto');\nconst it = $input.first();\nconst h = it.json.headers || {};\nconst out = (o) => [{ json: o }];\nlet raw = null;\nif (it.binary && it.binary.data) raw = await this.helpers.getBinaryDataBuffer(0, 'data');   // works in memory and filesystem binary modes\nif (!raw) return out({ valid: false, reason: 'no raw body' });\nconst ts = h['x-sentinel-timestamp'];\nconst sig = h['x-sentinel-signature'] || '';\nif (!ts || !(Math.abs(Date.now() / 1000 - Number(ts)) <= 300)) return out({ valid: false, reason: 'stale or missing timestamp' });\nconst want = crypto.createHmac('sha256', $env.SENTINEL_HMAC_SECRET).update(ts + '.').update(raw).digest('hex');\nconst a = Buffer.from(want), b = Buffer.from(sig);\nif (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return out({ valid: false, reason: 'bad signature' });\nconst event = JSON.parse(raw.toString('utf8'));\n// Identifiers become URL path segments: accept only the exact formats the API generates (defense in depth; the event is already HMAC-signed).\nconst malformed = (k, re) => event[k] !== undefined && !re.test(String(event[k]));\nif (malformed('event_id', /^evt_[A-Za-z0-9_]{1,64}$/) || malformed('approval_id', /^apr_[a-f0-9]{8,32}$/) || malformed('case_id', /^case_[A-Za-z0-9_-]{1,120}$/))\n  return out({ valid: false, reason: 'malformed identifier' });\nreturn out({ valid: true, duplicate: false, event });   // dedupe is checked against the API, not n8n static data\n"
+      }
+    },
+    {
+      "id": "sentinelNotify00001-2",
+      "name": "Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        400,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "sentinelNotify00001-3",
+      "name": "Respond 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        600,
+        140
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: $json.reason }) }}",
+        "options": {
+          "responseCode": 401
+        }
+      }
+    },
+    {
+      "id": "sentinelNotify00001-4",
+      "name": "Respond 500 (outbox will retry)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1800,
+        300
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: \"temporary failure, retry\" }) }}",
+        "options": {
+          "responseCode": 500
+        }
+      }
+    },
+    {
+      "id": "sentinelNotify00001-5",
+      "name": "Seen before?",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        500,
+        -140
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SENTINEL_API }}/internal/events/{{ encodeURIComponent($json.event.event_id) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelNotify00001-6",
+      "name": "Check seen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        650,
+        -140
+      ],
+      "parameters": {
+        "jsCode": "\nconst r = $input.first().json;\nif (r.statusCode !== 200) throw new Error('dedupe lookup answered HTTP ' + r.statusCode);\nreturn [{ json: { duplicate: !!(r.body && r.body.seen) } }];\n"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelNotify00001-7",
+      "name": "Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        900,
+        -60
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.duplicate }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "sentinelNotify00001-8",
+      "name": "Respond duplicate",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1100,
+        -140
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ duplicate: true }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "sentinelNotify00001-9",
+      "name": "Build Slack message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        40
+      ],
+      "parameters": {
+        "jsCode": "const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst sm = (() => { try { const b = $('Summarize case').first().json.body; return b && b.summary ? b : null; } catch (e) { return null; } })();\n\nconst ev = $('Verify signature').first().json.event;\nconst icon = { REFUSED: ':no_entry:', POLICY_INVALID: ':warning:', APPROVED: ':white_check_mark:', REJECTED: ':x:', EXPIRED: ':hourglass:',\n               VERIFIED: ':white_check_mark:', VERIFICATION_FAILED: ':rotating_light:', EXECUTION_FAILED: ':rotating_light:' }[ev.to_state] || ':information_source:';\nconst needsAttention = ['REFUSED', 'POLICY_INVALID', 'EXPIRED', 'EXECUTION_FAILED', 'VERIFICATION_FAILED'].includes(ev.to_state);\nconst s = ev.summary || {}, d = ev.detail || {};\nconst lines = [`${icon} *${esc(ev.to_state)}* \\u2014 ${esc(s.workload)} (${esc(ev.tenant_id)})`,\n  `case \\`${esc(ev.case_id)}\\` \\u00b7 ${esc(ev.from_state)} \\u2192 ${esc(ev.to_state)} \\u00b7 by ${esc(ev.actor)}`,\n  '_Alert only: this system investigates and informs; people decide and fix._'];\nif (ev.to_state === 'APPROVED' && ev.action_mode !== 'tag_after_approval') lines.push('human decision recorded; the system made NO change, the owner fixes it by hand');\nif (s.owner) lines.push(`owner: ${esc(s.owner)} \\u00b7 risk: ${esc(s.risk)} \\u00b7 projected: ${esc(s.projected_monthly)} ${esc(s.currency)}/month (projected, not realized)`);\nif (d.reasons && d.reasons.length) lines.push('reasons: ' + d.reasons.map(esc).join('; '));\nif (d.note) lines.push('note: ' + esc(d.note));\nif (d.matched_ids && d.matched_ids.length) lines.push('targets: ' + d.matched_ids.map(esc).join(', '));\nif (d.verification_ok !== undefined) lines.push('re-checked in the live resource state: ' + (d.verification_ok ? 'change observed' : 'CHANGE NOT OBSERVED'));\nif (needsAttention && sm && sm.briefing) lines.push('', sm.briefing);\n\nif (sm) lines.push('', '*Investigation summary* (' + (sm.source === 'llm' ? 'AI-written from verified evidence, every number and id fact-checked' : 'built from verified evidence') + '):\\n' + esc(sm.summary));\ntry { lines.push('', '_ref ' + $('Verify signature').first().json.event.event_id + '_'); } catch (e) { /* no reference available */ }\nreturn [{ json: { slack_text: lines.join('\\n') } }];\n"
+      }
+    },
+    {
+      "id": "sentinelNotify00001-10",
+      "name": "Mark seen (API)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1900,
+        40
+      ],
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $env.SENTINEL_API }}/internal/events/{{ encodeURIComponent($node['Verify signature'].json.event.event_id) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ workflow: 'notify' }) }}"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelNotify00001-11",
+      "name": "Mark handled",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2050,
+        40
+      ],
+      "parameters": {
+        "jsCode": "\nconst r = $input.first().json;\nif (r.statusCode !== 200) throw new Error('marking the event seen answered HTTP ' + r.statusCode);\nreturn [{ json: { handled: true } }];\n"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelNotify00001-12",
+      "name": "Respond 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2300,
+        40
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, handled: $json.handled }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "sentinelNotify00001-13",
+      "name": "Summarize case",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1000,
+        120
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SENTINEL_API }}/cases/{{ encodeURIComponent($node['Verify signature'].json.event.case_id) }}/summary",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "sentinelNotify00001-14",
+      "name": "Outcome: Slack on?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1300,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ !!$env.SENTINEL_SLACK_WEBHOOK_URL && !!$json.slack_text }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "sentinelNotify00001-15",
+      "name": "Outcome: Post to Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1500,
+        -20
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SENTINEL_SLACK_WEBHOOK_URL }}",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.slack_text }) }}"
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelNotify00001-16",
+      "name": "Outcome: Check Slack",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1700,
+        -20
+      ],
+      "parameters": {
+        "jsCode": "\n// Slack incoming webhooks answer 200 \"ok\". Temporary trouble (429/5xx/network) is retried; a 4xx is permanent\n// (bad URL / revoked webhook): it is surfaced in the execution but never retried forever.\nconst r = $input.first().json; const c = Number(r.statusCode || 0);\nif (c === 0 || c === 429 || c >= 500) throw new Error('Slack temporary failure HTTP ' + c);\nreturn [{ json: { slack_status: c, slack_ok: c === 200, slack_error: c === 200 ? null : String(r.body || '').slice(0, 120) } }];\n"
+      },
+      "onError": "continueErrorOutput"
+    }
+  ],
+  "connections": {
+    "Seen before?": {
+      "main": [
+        [
+          {
+            "node": "Check seen",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check seen": {
+      "main": [
+        [
+          {
+            "node": "Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark seen (API)": {
+      "main": [
+        [
+          {
+            "node": "Mark handled",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark handled": {
+      "main": [
+        [
+          {
+            "node": "Respond 200",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "State change event": {
+      "main": [
+        [
+          {
+            "node": "Verify signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify signature": {
+      "main": [
+        [
+          {
+            "node": "Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid?": {
+      "main": [
+        [
+          {
+            "node": "Seen before?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Duplicate?": {
+      "main": [
+        [
+          {
+            "node": "Respond duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Summarize case",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize case": {
+      "main": [
+        [
+          {
+            "node": "Build Slack message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Slack message": {
+      "main": [
+        [
+          {
+            "node": "Outcome: Slack on?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Outcome: Slack on?": {
+      "main": [
+        [
+          {
+            "node": "Outcome: Post to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark seen (API)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Outcome: Post to Slack": {
+      "main": [
+        [
+          {
+            "node": "Outcome: Check Slack",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Outcome: Check Slack": {
+      "main": [
+        [
+          {
+            "node": "Mark seen (API)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "versionId": "sentinelNotify00001-v1"
+}

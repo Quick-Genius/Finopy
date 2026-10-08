@@ -63,14 +63,14 @@ def webhook(path):
 
 # ------------------------------------------------------------------ shared Code snippets
 VERIFY = r"""
-// Verify HMAC over the RAW body + timestamp window, then dedupe by event_id. Never throws: returns a verdict.
+// Verify HMAC over the RAW body + timestamp window. Never throws: returns a verdict.
 const crypto = require('crypto');
 const it = $input.first();
 const h = it.json.headers || {};
 const out = (o) => [{ json: o }];
-const b64 = it.binary && it.binary.data ? it.binary.data.data : null;
-if (!b64) return out({ valid: false, reason: 'no raw body' });
-const raw = Buffer.from(b64, 'base64');
+let raw = null;
+if (it.binary && it.binary.data) raw = await this.helpers.getBinaryDataBuffer(0, 'data');   // works in memory and filesystem binary modes
+if (!raw) return out({ valid: false, reason: 'no raw body' });
 const ts = h['x-sentinel-timestamp'];
 const sig = h['x-sentinel-signature'] || '';
 if (!ts || !(Math.abs(Date.now() / 1000 - Number(ts)) <= 300)) return out({ valid: false, reason: 'stale or missing timestamp' });
@@ -78,38 +78,123 @@ const want = crypto.createHmac('sha256', $env.SENTINEL_HMAC_SECRET).update(ts + 
 const a = Buffer.from(want), b = Buffer.from(sig);
 if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return out({ valid: false, reason: 'bad signature' });
 const event = JSON.parse(raw.toString('utf8'));
-const seen = $getWorkflowStaticData('global').seen || {};
-return out({ valid: true, duplicate: !!seen[event.event_id], event });
+// Identifiers become URL path segments: accept only the exact formats the API generates (defense in depth; the event is already HMAC-signed).
+const malformed = (k, re) => event[k] !== undefined && !re.test(String(event[k]));
+if (malformed('event_id', /^evt_[A-Za-z0-9_]{1,64}$/) || malformed('approval_id', /^apr_[a-f0-9]{8,32}$/) || malformed('case_id', /^case_[A-Za-z0-9_-]{1,120}$/))
+  return out({ valid: false, reason: 'malformed identifier' });
+return out({ valid: true, duplicate: false, event });   // dedupe is checked against the API, not n8n static data
 """
 
-MARK_SEEN = r"""
-// Record the event as handled only AFTER success, so a failed delivery is retried by the outbox, not swallowed.
-const sd = $getWorkflowStaticData('global');
-sd.seen = sd.seen || {};
-const ev = $('Verify signature').first().json.event;
-sd.seen[ev.event_id] = Date.now();
-const ks = Object.keys(sd.seen);
-if (ks.length > 500) ks.sort((x, y) => sd.seen[x] - sd.seen[y]).slice(0, ks.length - 500).forEach((k) => delete sd.seen[k]);
-return [{ json: { handled: true, event_id: ev.event_id, ...( $input.first() ? { upstream: $input.first().json.statusCode ?? null } : {}) } }];
+# n8n answers a webhook 200/empty when a node fails after the trigger, and the API outbox treats 2xx as "delivered".
+# So every call that must succeed has an ERROR OUTPUT that answers an explicit HTTP 500 (-> outbox retries, event NOT marked seen).
+CHECK_200 = r"""
+const r = $input.first().json;
+if (r.statusCode !== 200) throw new Error('API answered HTTP ' + r.statusCode);
+return [{ json: JSON.parse(JSON.stringify(r.body)) }];     // plain copy: returning n8n proxy objects overflows the stack
 """
+CHECK_DRYRUN = r"""
+const r = $input.first().json;
+if (r.statusCode >= 500) throw new Error('dry-run failed with HTTP ' + r.statusCode);
+// 2xx = done; 4xx (e.g. 409 blocked / not eligible) is a definite answer from the API, not something a retry fixes
+return [{ json: { dry_run_status: r.statusCode, body: JSON.parse(JSON.stringify(r.body ?? null)) } }];
+"""
+ON_ERR = {"onError": "continueErrorOutput"}
+
+
+def r500(w, pos):
+    return w.add("Respond 500 (outbox will retry)", "n8n-nodes-base.respondToWebhook", 1.1, respond(500, '={{ JSON.stringify({ error: "temporary failure, retry" }) }}'), pos)
+
+
+
+def seen_nodes(w, workflow, pos_q, fail):
+    """Duplicate check against the API (race-free, survives n8n restarts). Returns (first_node, last_node)."""
+    q = w.add("Seen before?", "n8n-nodes-base.httpRequest", 4.2, http("GET", f"={API}/internal/events/{{{{ encodeURIComponent($json.event.event_id) }}}}"), pos_q, **ON_ERR)
+    c = w.add("Check seen", "n8n-nodes-base.code", 2, {"jsCode": r"""
+const r = $input.first().json;
+if (r.statusCode !== 200) throw new Error('dedupe lookup answered HTTP ' + r.statusCode);
+return [{ json: { duplicate: !!(r.body && r.body.seen) } }];
+"""}, [pos_q[0] + 150, pos_q[1]], **ON_ERR)
+    w.link(q, c, 0); w.link(q, fail, 1); w.link(c, fail, 1)
+    return q, c
+
+
+def mark_nodes(w, workflow, pos, fail):
+    """Record the event as handled ONLY after success, via the API. Returns (first_node, last_node)."""
+    m = w.add("Mark seen (API)", "n8n-nodes-base.httpRequest", 4.2,
+              {**http("PUT", f"={API}/internal/events/{{{{ encodeURIComponent($node['Verify signature'].json.event.event_id) }}}}", body=f"={{{{ JSON.stringify({{ workflow: '{workflow}' }}) }}}}")}, pos, **ON_ERR)
+    k = w.add("Mark handled", "n8n-nodes-base.code", 2, {"jsCode": r"""
+const r = $input.first().json;
+if (r.statusCode !== 200) throw new Error('marking the event seen answered HTTP ' + r.statusCode);
+return [{ json: { handled: true } }];
+"""}, [pos[0] + 150, pos[1]], **ON_ERR)
+    w.link(m, k, 0); w.link(m, fail, 1); w.link(k, fail, 1)
+    return m, k
+
+
+
+def summary_node(w, case_id_expr, pos):
+    """Best-effort call to the API for a fact-checked investigation summary. A failure here must never stop a notification."""
+    return w.add("Summarize case", "n8n-nodes-base.httpRequest", 4.2,
+                 http("GET", f"={API}/cases/{{{{ encodeURIComponent({case_id_expr}) }}}}/summary", timeout=30000), pos, onError="continueRegularOutput")
+
+
+SM_JS = r"""
+const sm = (() => { try { const b = $('Summarize case').first().json.body; return b && b.summary ? b : null; } catch (e) { return null; } })();
+"""
+
+SUMMARY_JS = r"""
+if (sm) lines.push('', '*Investigation summary* (' + (sm.source === 'llm' ? 'AI-written from verified evidence, every number and id fact-checked' : 'built from verified evidence') + '):\n' + esc(sm.summary));
+try { lines.push('', '_ref ' + $('Verify signature').first().json.event.event_id + '_'); } catch (e) { /* no reference available */ }
+"""
+
+SLACK_ON = "={{ !!$env.SENTINEL_SLACK_WEBHOOK_URL && !!$json.slack_text }}"
+CHECK_SLACK = r"""
+// Slack incoming webhooks answer 200 "ok". Temporary trouble (429/5xx/network) is retried; a 4xx is permanent
+// (bad URL / revoked webhook): it is surfaced in the execution but never retried forever.
+const r = $input.first().json; const c = Number(r.statusCode || 0);
+if (c === 0 || c === 429 || c >= 500) throw new Error('Slack temporary failure HTTP ' + c);
+return [{ json: { slack_status: c, slack_ok: c === 200, slack_error: c === 200 ? null : String(r.body || '').slice(0, 120) } }];
+"""
+ESC = "const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');"
+
+
+def slack_chain(w, tag, src, dst, pos, fail=None):
+    """src (json.slack_text) -> [Slack on?] -> POST webhook -> check -> dst.  Silent when SENTINEL_SLACK_WEBHOOK_URL is unset.
+    fail given  -> blocking (error output answers HTTP 500 so the outbox retries).
+    fail None   -> best effort: a Slack problem can never stop an approval."""
+    extra = ON_ERR if fail else {"onError": "continueRegularOutput"}
+    on = w.add(f"{tag}: Slack on?", "n8n-nodes-base.if", 2.2, if_true(SLACK_ON), pos)
+    post = w.add(f"{tag}: Post to Slack", "n8n-nodes-base.httpRequest", 4.2,
+                 http("POST", "={{ $env.SENTINEL_SLACK_WEBHOOK_URL }}", [{"name": "Content-Type", "value": "application/json"}],
+                      body="={{ JSON.stringify({ text: $json.slack_text }) }}", timeout=20000), [pos[0] + 200, pos[1] - 60], retryOnFail=True, maxTries=3, waitBetweenTries=2000, **extra)
+    chk = w.add(f"{tag}: Check Slack", "n8n-nodes-base.code", 2, {"jsCode": CHECK_SLACK}, [pos[0] + 400, pos[1] - 60], **extra)
+    w.link(src, on); w.link(on, post, 0); w.link(post, chk, 0)
+    if dst:
+        w.link(on, dst, 1); w.link(chk, dst, 0)
+    if fail:
+        w.link(post, fail, 1); w.link(chk, fail, 1)
+    return on
 
 
 def build_analysis():
     w = WF("sentinelAnalysis01", "Sentinel scheduled analysis")
     sched = w.add("Hourly schedule", "n8n-nodes-base.scheduleTrigger", 1.2, {"rule": {"interval": [{"field": "hours", "hoursInterval": 1}]}}, [0, 0])
     hook = w.add("Run now (manual)", "n8n-nodes-base.webhook", 2, webhook("sentinel-run-now"), [0, 200], webhookId="sentinel-run-now")
-    ok = w.add("Secret ok?", "n8n-nodes-base.if", 2.2, if_true("={{ $json.headers['x-run-now-secret'] === $env.SENTINEL_RUN_NOW_SECRET }}"), [220, 200])
+    ok = w.add("Secret ok?", "n8n-nodes-base.if", 2.2, if_true("={{ !!$env.SENTINEL_RUN_NOW_SECRET && $json.headers['x-run-now-secret'] === $env.SENTINEL_RUN_NOW_SECRET }}"), [220, 200])
     r202 = w.add("Respond 202", "n8n-nodes-base.respondToWebhook", 1.1, respond(202, '={{ JSON.stringify({ started: true }) }}'), [440, 120])
     r401 = w.add("Respond 401", "n8n-nodes-base.respondToWebhook", 1.1, respond(401, '={{ JSON.stringify({ error: "bad run-now secret" }) }}'), [440, 300])
     sync = w.add("CloudQuery sync", "n8n-nodes-base.httpRequest", 4.2,
                  http("POST", "={{ $env.SENTINEL_CQ_URL }}/sync", [{"name": "Authorization", "value": "=Bearer {{ $env.SENTINEL_CQ_TOKEN }}"}], timeout=600000, full=False), [680, 0])
     build = w.add("Build analysis request", "n8n-nodes-base.code", 2, {"jsCode": r"""
-// The CloudQuery job returns a completion record; carry its sync_id into the analysis (snapshot lineage).
-const s = $input.first().json;
+// A failed or incomplete sync PAUSES analysis: fail the run loudly (a stale snapshot may explain a case, never authorize one).
+const s = $input.first().json || {};
+if (!s.sync_id) throw new Error('sync returned no sync_id - analysis paused');
+if (Number(s.exit_code) !== 0) throw new Error('sync exit_code=' + s.exit_code + ' - analysis paused');
+if (!s.finished_at) throw new Error('sync has no finished_at - analysis paused');
 return [{ json: { tenant_ids: ['payments', 'analytics'], idempotency_prefix: 'run-' + s.sync_id,
   sync: { sync_id: s.sync_id, started_at: s.started_at, finished_at: s.finished_at, plugin_versions: s.plugin_versions, exit_code: s.exit_code } } }];
 """}, [900, 0])
-    ana = w.add("Analyze (API)", "n8n-nodes-base.httpRequest", 4.2, http("POST", f"={API}/internal/analyze", body="={{ JSON.stringify($json) }}", timeout=300000), [1120, 0])
+    ana = w.add("Analyze (API)", "n8n-nodes-base.httpRequest", 4.2, http("POST", f"={API}/internal/analyze", body="={{ JSON.stringify($json) }}", timeout=300000, full=False), [1120, 0])
     w.link(sched, sync); w.link(hook, ok); w.link(ok, r202, 0); w.link(ok, r401, 1); w.link(r202, sync)
     w.link(sync, build); w.link(build, ana)
     w.save()
@@ -123,20 +208,40 @@ def build_intake():
     r401 = w.add("Respond 401", "n8n-nodes-base.respondToWebhook", 1.1, respond(401, '={{ JSON.stringify({ error: $json.reason }) }}'), [600, 140])
     dup = w.add("Duplicate?", "n8n-nodes-base.if", 2.2, if_true("={{ $json.duplicate }}"), [600, -60])
     rdup = w.add("Respond duplicate", "n8n-nodes-base.respondToWebhook", 1.1, respond(200, '={{ JSON.stringify({ duplicate: true }) }}'), [800, -140])
-    case = w.add("Fetch case", "n8n-nodes-base.httpRequest", 4.2, http("GET", f"={API}/cases/{{{{ $node['Verify signature'].json.event.case_id }}}}", full=False), [800, 40])
+    fail = r500(w, [1400, 300])
+    case = w.add("Fetch case", "n8n-nodes-base.httpRequest", 4.2, http("GET", f"={API}/cases/{{{{ encodeURIComponent($node['Verify signature'].json.event.case_id) }}}}"), [800, 40], **ON_ERR)
+    chk = w.add("Check case", "n8n-nodes-base.code", 2, {"jsCode": CHECK_200}, [1000, 40], **ON_ERR)
     route = w.add("Route = dry_run?", "n8n-nodes-base.if", 2.2,
-                  if_true("={{ $json.content.recommendation.route === 'dry_run' && $json.state === 'INVESTIGATED' }}"), [1000, 40])
+                  if_true("={{ $json.content.recommendation.route === 'dry_run' && $json.state === 'INVESTIGATED' }}"), [1200, 40])
     dry = w.add("Start dry-run (API)", "n8n-nodes-base.httpRequest", 4.2,
-                http("POST", f"={API}/cases/{{{{ $node['Verify signature'].json.event.case_id }}}}/dry-run"), [1200, -20])
-    fin = w.add("Finish", "n8n-nodes-base.code", 2, {"jsCode": r"""
-const r = $input.first().json;
-if (r.statusCode >= 500) throw new Error('dry-run failed with ' + r.statusCode + ': the outbox will retry this event');
-""" + MARK_SEEN}, [1400, -20])
-    digest = w.add("Digest only (no action)", "n8n-nodes-base.code", 2, {"jsCode": MARK_SEEN}, [1200, 120])
-    ok = w.add("Respond 200", "n8n-nodes-base.respondToWebhook", 1.1, respond(200, '={{ JSON.stringify({ ok: true, handled: $json.handled }) }}'), [1600, 40])
-    w.link(hook, ver); w.link(ver, valid); w.link(valid, dup, 0); w.link(valid, r401, 1)
-    w.link(dup, rdup, 0); w.link(dup, case, 1); w.link(case, route); w.link(route, dry, 0); w.link(route, digest, 1)
-    w.link(dry, fin); w.link(fin, ok); w.link(digest, ok)
+                http("POST", f"={API}/cases/{{{{ encodeURIComponent($node['Verify signature'].json.event.case_id) }}}}/dry-run"), [1400, -20], **ON_ERR)
+    chkd = w.add("Check dry-run", "n8n-nodes-base.code", 2, {"jsCode": CHECK_DRYRUN}, [1600, -20], **ON_ERR)
+    sq, sc = seen_nodes(w, "intake", [500, -140], fail)
+    seen, seen_done = mark_nodes(w, "intake", [1800, 40], fail)
+    ok = w.add("Respond 200", "n8n-nodes-base.respondToWebhook", 1.1, respond(200, '={{ JSON.stringify({ ok: true, handled: $json.handled }) }}'), [2200, 40])
+    w.link(hook, ver); w.link(ver, valid); w.link(valid, sq, 0); w.link(valid, r401, 1); w.link(sc, dup)
+    w.link(dup, rdup, 0); w.link(dup, case, 1)
+    w.link(case, chk, 0); w.link(case, fail, 1); w.link(chk, route, 0); w.link(chk, fail, 1)
+    dig = w.add("Build digest message", "n8n-nodes-base.code", 2, {"jsCode": ESC + SM_JS + r"""
+// Only cases that need a human produce a Slack message; dismissed/legitimate ones stay silent (digest only, no action).
+const k = $('Check case').first().json;
+const rec = k.content.recommendation;
+if (rec.route !== 'review') return [{ json: { slack_text: '' } }];
+const a = k.content.attribution;
+const lines = [`:mag: *Needs human review* \u2014 ${esc(k.content.workload)} (${esc(k.tenant_id)})`,
+  `case \`${esc(k.case_id)}\` \u00b7 ${esc(k.content.assessment.classification)} \u00b7 owner: ${esc(a.owner || 'unknown')} (confidence ${esc(a.confidence)})`,
+  '_Alert only: nothing has been changed, and nothing can be approved until ownership is resolved._', ''];
+if (sm && sm.briefing) lines.push(sm.briefing);
+else lines.push('why: ' + k.content.assessment.reasons.map(esc).join('; '), `projected: ${esc(rec.projected_savings.monthly)} USD/month (projected, not realized)`);
+""" + SUMMARY_JS + r"""return [{ json: { slack_text: lines.join('\n') } }];
+"""}, [1400, 140])
+    needs = w.add("Needs review?", "n8n-nodes-base.if", 2.2, if_true("={{ $json.content.recommendation.route === 'review' }}"), [1300, 140])
+    summ = summary_node(w, "$node['Verify signature'].json.event.case_id", [1400, 220])
+    w.link(route, dry, 0); w.link(route, needs, 1)         # not a dry-run case -> digest (+ Slack only if it needs review)
+    w.link(needs, summ, 0); w.link(needs, seen, 1); w.link(summ, dig)
+    slack_chain(w, "Review", dig, seen, [1500, 200], fail)
+    w.link(dry, chkd, 0); w.link(dry, fail, 1); w.link(chkd, seen, 0); w.link(chkd, fail, 1)
+    w.link(seen_done, ok)
     w.save()
 
 
@@ -148,19 +253,27 @@ def build_approval():
     r401 = w.add("Respond 401", "n8n-nodes-base.respondToWebhook", 1.1, respond(401, '={{ JSON.stringify({ error: $json.reason }) }}'), [600, 140])
     dup = w.add("Duplicate?", "n8n-nodes-base.if", 2.2, if_true("={{ $json.duplicate }}"), [600, -60])
     rdup = w.add("Respond duplicate", "n8n-nodes-base.respondToWebhook", 1.1, respond(200, '={{ JSON.stringify({ duplicate: true }) }}'), [800, -140])
-    seen = w.add("Mark seen", "n8n-nodes-base.code", 2, {"jsCode": MARK_SEEN}, [800, 40])
-    acc = w.add("Respond accepted", "n8n-nodes-base.respondToWebhook", 1.1, respond(200, '={{ JSON.stringify({ accepted: true }) }}'), [1000, 40])
+    fail = r500(w, [1500, 300])
     pkt = w.add("Get approval packet", "n8n-nodes-base.httpRequest", 4.2,
-                http("GET", f"={API}/approvals/{{{{ $node['Verify signature'].json.event.approval_id }}}}", full=False), [1200, 40])
+                http("GET", f"={API}/approvals/{{{{ encodeURIComponent($node['Verify signature'].json.event.approval_id) }}}}"), [800, 40], **ON_ERR)
+    chkp = w.add("Check packet", "n8n-nodes-base.code", 2, {"jsCode": CHECK_200}, [1000, 40], **ON_ERR)
     pub = w.add("Publish form URL", "n8n-nodes-base.httpRequest", 4.2,
-                http("POST", f"={API}/approvals/{{{{ $json.approval_id }}}}/form-url", body="={{ JSON.stringify({ form_url: $execution.resumeFormUrl }) }}", full=False), [1400, 40])
+                http("POST", f"={API}/approvals/{{{{ encodeURIComponent($json.approval_id) }}}}/form-url", body="={{ JSON.stringify({ form_url: $execution.resumeFormUrl }) }}"), [1200, 40], **ON_ERR)
+    chkpub = w.add("Check published", "n8n-nodes-base.code", 2, {"jsCode": r"""
+const r = $input.first().json;
+if (r.statusCode !== 200) throw new Error('form-url publish answered HTTP ' + r.statusCode);
+return [{ json: { published: true } }];
+"""}, [1400, 40], **ON_ERR)
+    sq, sc = seen_nodes(w, "approval", [500, -140], fail)
+    seen, seen_done = mark_nodes(w, "approval", [1600, 40], fail)
+    acc = w.add("Respond accepted", "n8n-nodes-base.respondToWebhook", 1.1, respond(200, '={{ JSON.stringify({ accepted: true }) }}'), [1800, 40])
     form = w.add("Build form", "n8n-nodes-base.code", 2, {"jsCode": r"""
 // Everything shown comes from the API's own record of the approval; values are HTML-escaped.
-const p = $('Get approval packet').first().json;
+const p = $('Check packet').first().json;
 const e = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const err = $json.lastError ? `<p style="color:#b3261e"><b>Previous attempt refused:</b> ${e($json.lastError)}</p>` : '';
 const rows = [
-  ['Tenant', p.tenant_id], ['Accountable owner', `${p.owner} (confidence ${p.attribution_confidence})`], ['Action', `${p.action} via template ${p.template}`],
+  ['Tenant', p.tenant_id], ['Accountable owner', `${p.owner} (confidence ${p.attribution_confidence})`], ['Proposed fix', p.action_mode === 'tag_after_approval' ? `${p.action} via template ${p.template} (applied by the isolated runner after you approve)` : `${p.action} via template ${p.template} (NOT applied by the system: approving only records your decision, a person does the fix)`],
   ['Exact targets (' + p.target_count + ')', p.targets.map((t) => `${t.id}${t.name ? ' (' + t.name + ')' : ''}`).join(', ')],
   ['Excluded', (p.excluded || []).map((x) => `${x.resource_id}: ${x.reason}`).join('; ') || 'none'],
   ['Projected saving', `${p.projected_savings.monthly} ${p.projected_savings.currency}/month (projected, not realized)`],
@@ -169,22 +282,38 @@ const rows = [
 ];
 const html = err + '<table style="text-align:left;font-size:13px">' + rows.map(([k, v]) => `<tr><th style="padding-right:12px;vertical-align:top">${e(k)}</th><td style="word-break:break-all">${e(v)}</td></tr>`).join('') + '</table>' +
   '<p>Your decision is checked by the Sentinel API against its own copy of these values. The form cannot change targets, policy or tenant.</p>';
-return [{ json: { formHtml: html } }];
-"""}, [1600, 40])
+return [{ json: { formHtml: html, retry: !!$json.lastError } }];
+"""}, [2000, 40])
+    smsg = w.add("Build Slack approval message", "n8n-nodes-base.code", 2, {"jsCode": ESC + SM_JS + r"""
+// Sent once per approval (not again after a wrong-PIN retry). The link is the n8n form; the API still checks ID + PIN.
+if ($json.retry) return [{ json: { slack_text: '' } }];
+const p = $('Check packet').first().json;
+const ids = p.targets.map((t) => `${esc(t.id)}${t.name ? ' (' + esc(t.name) + ')' : ''}`).join(', ');
+const lines = [`:bell: *Approval needed* \u2014 ${esc(p.owner)} \u00b7 tenant *${esc(p.tenant_id)}*`,
+  `case \`${esc(p.case_id)}\` v${esc(p.case_version)} \u00b7 proposed fix: ${esc(p.action)} \u00b7 risk: ${esc(p.risk)}`,
+  p.action_mode === 'tag_after_approval' ? '_Alert only: nothing has been changed yet. A human decides; the only action the system can ever take is a reversible tag._' : '_Alert only: nothing has been changed, and the system will not change anything. A human decides and fixes it by hand._', ''];
+if (sm && sm.briefing) lines.push(sm.briefing, '');
+else lines.push(`projected saving: ${esc(p.projected_savings.monthly)} ${esc(p.projected_savings.currency)}/month (projected, not realized)`, `rollback: ${esc(p.rollback)}`, '');
+lines.push(`*Exact targets (${p.target_count}):* ${ids}`);
+if (p.excluded && p.excluded.length) lines.push('*Excluded:* ' + p.excluded.map((x) => `${esc(x.resource_id)} (${esc(x.reason)})`).join('; '));
+lines.push(`*Expires:* ${esc(p.expires_at)}`,
+  `<${$execution.resumeFormUrl}|Open the approval form> \u2014 needs approver ID + PIN. Silence expires it; nothing is ever auto-approved.`);
+""" + SUMMARY_JS + r"""return [{ json: { slack_text: lines.join('\n') } }];
+"""}, [2100, 40])
     wait = w.add("Wait for approver", "n8n-nodes-base.wait", 1.1, {
-        "resume": "form", "formTitle": "Sentinel approval", "formDescription": "={{ $json.formHtml }}",
+        "resume": "form", "formTitle": "Sentinel approval", "formDescription": "={{ $node['Build form'].json.formHtml }}",
         "formFields": {"values": [
             {"fieldLabel": "Approver ID", "fieldType": "text", "requiredField": True, "placeholder": "e.g. payments-approver"},
             {"fieldLabel": "Approver PIN", "fieldType": "password", "requiredField": True},
             {"fieldLabel": "Decision", "fieldType": "dropdown", "requiredField": True, "fieldOptions": {"values": [{"option": "approve"}, {"option": "reject"}]}},
             {"fieldLabel": "Note", "fieldType": "textarea"}]},
         "limitWaitTime": True, "limitType": "atSpecifiedTime",
-        "maxDateAndTime": "={{ new Date(new Date($node['Get approval packet'].json.expires_at).getTime() + 3000).toISOString() }}",
-        "options": {}}, [1800, 40], webhookId="sentinel-approval-form")
+        "maxDateAndTime": "={{ new Date(new Date($node['Check packet'].json.expires_at).getTime() + 3000).toISOString() }}",
+        "options": {}}, [2200, 40], webhookId="sentinel-approval-form")
     cbk = w.add("Build signed callback", "n8n-nodes-base.code", 2, {"jsCode": r"""
 // Signs EXACTLY the bytes that the next node sends. The body carries only identifiers and the values the approver saw.
 const crypto = require('crypto');
-const p = $('Get approval packet').first().json;
+const p = $('Check packet').first().json;
 const f = $input.first().json;
 const decided = !!f['Decision'];                       // a timed-out wait resumes with no form data
 const body = {
@@ -196,19 +325,73 @@ const body = {
 const raw = JSON.stringify(body);
 const ts = String(Math.floor(Date.now() / 1000));
 const sig = crypto.createHmac('sha256', $env.SENTINEL_HMAC_SECRET).update(ts + '.').update(raw).digest('hex');
-return [{ json: { raw, ts, sig } }];
-"""}, [2000, 40])
+return [{ json: { raw, ts, sig, decision: body.decision } }];
+"""}, [2400, 40])
     post = w.add("Callback /approve (API)", "n8n-nodes-base.httpRequest", 4.2,
                  http("POST", f"={API}/approve", headers=AUTH + [{"name": "x-sentinel-timestamp", "value": "={{ $json.ts }}"}, {"name": "x-sentinel-signature", "value": "={{ $json.sig }}"}],
-                      body="={{ $json.raw }}", raw=True), [2200, 40])
-    retry = w.add("Refused (identity)?", "n8n-nodes-base.if", 2.2, if_true("={{ $json.statusCode === 403 }}"), [2400, 40])
-    seterr = w.add("Remember refusal", "n8n-nodes-base.code", 2, {"jsCode": "return [{ json: { lastError: ($input.first().json.body && $input.first().json.body.error) || 'refused' } }];"}, [2600, 0])
-    w.link(hook, ver); w.link(ver, valid); w.link(valid, dup, 0); w.link(valid, r401, 1)
-    w.link(dup, rdup, 0); w.link(dup, seen, 1); w.link(seen, acc); w.link(acc, pkt); w.link(pkt, pub); w.link(pub, form)
-    w.link(form, wait); w.link(wait, cbk); w.link(cbk, post); w.link(post, retry); w.link(retry, seterr, 0); w.link(seterr, form)
+                      body="={{ $json.raw }}", raw=True), [2600, 40])
+    retry = w.add("Refused (identity)?", "n8n-nodes-base.if", 2.2,
+                  if_true("={{ $json.statusCode === 403 && $node['Build signed callback'].json.decision !== 'timeout' }}"), [2800, 40])
+    seterr = w.add("Remember refusal", "n8n-nodes-base.code", 2, {"jsCode": "return [{ json: { lastError: String(($input.first().json.body && $input.first().json.body.error) || 'refused') } }];"}, [3000, 0])
+    res = w.add("Check result", "n8n-nodes-base.code", 2, {"jsCode": r"""
+// 2xx = recorded; 409 = gate already closed (duplicate click / expired / version changed) - nothing more to do. Anything else is a visible failure.
+const r = $input.first().json;
+const code = Number(r.statusCode);
+const b = r.body && typeof r.body === 'object' ? r.body : {};
+if ((code >= 200 && code < 300) || code === 409) return [{ json: { status_code: code, outcome: String(b.outcome || b.error || '') } }];
+throw new Error('POST /approve failed with HTTP ' + code + ': ' + JSON.stringify(b).slice(0, 300));
+"""}, [3000, 120])
+    w.link(hook, ver); w.link(ver, valid); w.link(valid, sq, 0); w.link(valid, r401, 1); w.link(sc, dup)
+    w.link(dup, rdup, 0); w.link(dup, pkt, 1)
+    w.link(pkt, chkp, 0); w.link(pkt, fail, 1); w.link(chkp, pub, 0); w.link(chkp, fail, 1)
+    w.link(pub, chkpub, 0); w.link(pub, fail, 1); w.link(chkpub, seen, 0); w.link(chkpub, fail, 1)
+    summ = summary_node(w, "$node['Check packet'].json.case_id", [1900, 120])
+    w.link(seen_done, acc); w.link(acc, summ); w.link(summ, form); w.link(form, smsg)
+    slack_chain(w, "Approval", smsg, wait, [2150, 120])      # best effort; then the Wait
+    w.link(wait, cbk); w.link(cbk, post); w.link(post, retry)
+    w.link(retry, seterr, 0); w.link(retry, res, 1); w.link(seterr, form)
+    w.save()
+
+
+
+def build_notify():
+    w = WF("sentinelNotify00001", "Sentinel notify")
+    hook = w.add("State change event", "n8n-nodes-base.webhook", 2, webhook("sentinel-notify"), [0, 0], webhookId="sentinel-notify")
+    ver = w.add("Verify signature", "n8n-nodes-base.code", 2, {"jsCode": VERIFY}, [200, 0])
+    valid = w.add("Valid?", "n8n-nodes-base.if", 2.2, if_true("={{ $json.valid }}"), [400, 0])
+    r401 = w.add("Respond 401", "n8n-nodes-base.respondToWebhook", 1.1, respond(401, '={{ JSON.stringify({ error: $json.reason }) }}'), [600, 140])
+    fail = r500(w, [1800, 300])
+    sq, sc = seen_nodes(w, "notify", [500, -140], fail)
+    dup = w.add("Duplicate?", "n8n-nodes-base.if", 2.2, if_true("={{ $json.duplicate }}"), [900, -60])
+    rdup = w.add("Respond duplicate", "n8n-nodes-base.respondToWebhook", 1.1, respond(200, '={{ JSON.stringify({ duplicate: true }) }}'), [1100, -140])
+    msg = w.add("Build Slack message", "n8n-nodes-base.code", 2, {"jsCode": ESC + SM_JS + r"""
+const ev = $('Verify signature').first().json.event;
+const icon = { REFUSED: ':no_entry:', POLICY_INVALID: ':warning:', APPROVED: ':white_check_mark:', REJECTED: ':x:', EXPIRED: ':hourglass:',
+               VERIFIED: ':white_check_mark:', VERIFICATION_FAILED: ':rotating_light:', EXECUTION_FAILED: ':rotating_light:' }[ev.to_state] || ':information_source:';
+const needsAttention = ['REFUSED', 'POLICY_INVALID', 'EXPIRED', 'EXECUTION_FAILED', 'VERIFICATION_FAILED'].includes(ev.to_state);
+const s = ev.summary || {}, d = ev.detail || {};
+const lines = [`${icon} *${esc(ev.to_state)}* \u2014 ${esc(s.workload)} (${esc(ev.tenant_id)})`,
+  `case \`${esc(ev.case_id)}\` \u00b7 ${esc(ev.from_state)} \u2192 ${esc(ev.to_state)} \u00b7 by ${esc(ev.actor)}`,
+  '_Alert only: this system investigates and informs; people decide and fix._'];
+if (ev.to_state === 'APPROVED' && ev.action_mode !== 'tag_after_approval') lines.push('human decision recorded; the system made NO change, the owner fixes it by hand');
+if (s.owner) lines.push(`owner: ${esc(s.owner)} \u00b7 risk: ${esc(s.risk)} \u00b7 projected: ${esc(s.projected_monthly)} ${esc(s.currency)}/month (projected, not realized)`);
+if (d.reasons && d.reasons.length) lines.push('reasons: ' + d.reasons.map(esc).join('; '));
+if (d.note) lines.push('note: ' + esc(d.note));
+if (d.matched_ids && d.matched_ids.length) lines.push('targets: ' + d.matched_ids.map(esc).join(', '));
+if (d.verification_ok !== undefined) lines.push('re-checked in the live resource state: ' + (d.verification_ok ? 'change observed' : 'CHANGE NOT OBSERVED'));
+if (needsAttention && sm && sm.briefing) lines.push('', sm.briefing);
+""" + SUMMARY_JS + r"""return [{ json: { slack_text: lines.join('\n') } }];
+"""}, [1100, 40])
+    seen, seen_done = mark_nodes(w, "notify", [1900, 40], fail)
+    ok = w.add("Respond 200", "n8n-nodes-base.respondToWebhook", 1.1, respond(200, '={{ JSON.stringify({ ok: true, handled: $json.handled }) }}'), [2300, 40])
+    w.link(hook, ver); w.link(ver, valid); w.link(valid, sq, 0); w.link(valid, r401, 1); w.link(sc, dup)
+    summ = summary_node(w, "$node['Verify signature'].json.event.case_id", [1000, 120])
+    w.link(dup, rdup, 0); w.link(dup, summ, 1); w.link(summ, msg)
+    slack_chain(w, "Outcome", msg, seen, [1300, 40], fail)
+    w.link(seen_done, ok)
     w.save()
 
 
 if __name__ == "__main__":
-    build_analysis(); build_intake(); build_approval()
+    build_analysis(); build_intake(); build_approval(); build_notify()
     print("wrote", sorted(p.name for p in OUT.glob("*.json")))

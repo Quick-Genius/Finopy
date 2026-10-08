@@ -139,6 +139,8 @@ def inspect(body: dict = Depends(signed)):
 
 @app.post("/execute")
 def execute(g: dict = Depends(signed)):
+    if os.environ.get("ACTION_MODE", "alert_only") != "tag_after_approval":
+        raise HTTPException(403, "alert-only mode: this runner will not change any resource")
     started = datetime.now(timezone.utc)
     ids, reasons = sorted(g["target_ids"]), []
 

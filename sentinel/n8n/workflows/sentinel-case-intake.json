@@ -31,7 +31,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "\n// Verify HMAC over the RAW body + timestamp window, then dedupe by event_id. Never throws: returns a verdict.\nconst crypto = require('crypto');\nconst it = $input.first();\nconst h = it.json.headers || {};\nconst out = (o) => [{ json: o }];\nconst b64 = it.binary && it.binary.data ? it.binary.data.data : null;\nif (!b64) return out({ valid: false, reason: 'no raw body' });\nconst raw = Buffer.from(b64, 'base64');\nconst ts = h['x-sentinel-timestamp'];\nconst sig = h['x-sentinel-signature'] || '';\nif (!ts || !(Math.abs(Date.now() / 1000 - Number(ts)) <= 300)) return out({ valid: false, reason: 'stale or missing timestamp' });\nconst want = crypto.createHmac('sha256', $env.SENTINEL_HMAC_SECRET).update(ts + '.').update(raw).digest('hex');\nconst a = Buffer.from(want), b = Buffer.from(sig);\nif (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return out({ valid: false, reason: 'bad signature' });\nconst event = JSON.parse(raw.toString('utf8'));\nconst seen = $getWorkflowStaticData('global').seen || {};\nreturn out({ valid: true, duplicate: !!seen[event.event_id], event });\n"
+        "jsCode": "\n// Verify HMAC over the RAW body + timestamp window. Never throws: returns a verdict.\nconst crypto = require('crypto');\nconst it = $input.first();\nconst h = it.json.headers || {};\nconst out = (o) => [{ json: o }];\nlet raw = null;\nif (it.binary && it.binary.data) raw = await this.helpers.getBinaryDataBuffer(0, 'data');   // works in memory and filesystem binary modes\nif (!raw) return out({ valid: false, reason: 'no raw body' });\nconst ts = h['x-sentinel-timestamp'];\nconst sig = h['x-sentinel-signature'] || '';\nif (!ts || !(Math.abs(Date.now() / 1000 - Number(ts)) <= 300)) return out({ valid: false, reason: 'stale or missing timestamp' });\nconst want = crypto.createHmac('sha256', $env.SENTINEL_HMAC_SECRET).update(ts + '.').update(raw).digest('hex');\nconst a = Buffer.from(want), b = Buffer.from(sig);\nif (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return out({ valid: false, reason: 'bad signature' });\nconst event = JSON.parse(raw.toString('utf8'));\n// Identifiers become URL path segments: accept only the exact formats the API generates (defense in depth; the event is already HMAC-signed).\nconst malformed = (k, re) => event[k] !== undefined && !re.test(String(event[k]));\nif (malformed('event_id', /^evt_[A-Za-z0-9_]{1,64}$/) || malformed('approval_id', /^apr_[a-f0-9]{8,32}$/) || malformed('case_id', /^case_[A-Za-z0-9_-]{1,120}$/))\n  return out({ valid: false, reason: 'malformed identifier' });\nreturn out({ valid: true, duplicate: false, event });   // dedupe is checked against the API, not n8n static data\n"
       }
     },
     {
@@ -138,6 +138,23 @@
     },
     {
       "id": "sentinelIntake0001-6",
+      "name": "Respond 500 (outbox will retry)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1400,
+        300
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: \"temporary failure, retry\" }) }}",
+        "options": {
+          "responseCode": 500
+        }
+      }
+    },
+    {
+      "id": "sentinelIntake0001-7",
       "name": "Fetch case",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
@@ -147,7 +164,7 @@
       ],
       "parameters": {
         "method": "GET",
-        "url": "={{ $env.SENTINEL_API }}/cases/{{ $node['Verify signature'].json.event.case_id }}",
+        "url": "={{ $env.SENTINEL_API }}/cases/{{ encodeURIComponent($node['Verify signature'].json.event.case_id) }}",
         "sendHeaders": true,
         "specifyHeaders": "keypair",
         "headerParameters": {
@@ -162,20 +179,35 @@
           "timeout": 60000,
           "response": {
             "response": {
-              "fullResponse": false,
+              "fullResponse": true,
               "neverError": true
             }
           }
         }
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
-      "id": "sentinelIntake0001-7",
+      "id": "sentinelIntake0001-8",
+      "name": "Check case",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        40
+      ],
+      "parameters": {
+        "jsCode": "\nconst r = $input.first().json;\nif (r.statusCode !== 200) throw new Error('API answered HTTP ' + r.statusCode);\nreturn [{ json: JSON.parse(JSON.stringify(r.body)) }];     // plain copy: returning n8n proxy objects overflows the stack\n"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelIntake0001-9",
       "name": "Route = dry_run?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        1000,
+        1200,
         40
       ],
       "parameters": {
@@ -204,17 +236,17 @@
       }
     },
     {
-      "id": "sentinelIntake0001-8",
+      "id": "sentinelIntake0001-10",
       "name": "Start dry-run (API)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1200,
+        1400,
         -20
       ],
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.SENTINEL_API }}/cases/{{ $node['Verify signature'].json.event.case_id }}/dry-run",
+        "url": "={{ $env.SENTINEL_API }}/cases/{{ encodeURIComponent($node['Verify signature'].json.event.case_id) }}/dry-run",
         "sendHeaders": true,
         "specifyHeaders": "keypair",
         "headerParameters": {
@@ -234,41 +266,130 @@
             }
           }
         }
-      }
-    },
-    {
-      "id": "sentinelIntake0001-9",
-      "name": "Finish",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1400,
-        -20
-      ],
-      "parameters": {
-        "jsCode": "\nconst r = $input.first().json;\nif (r.statusCode >= 500) throw new Error('dry-run failed with ' + r.statusCode + ': the outbox will retry this event');\n\n// Record the event as handled only AFTER success, so a failed delivery is retried by the outbox, not swallowed.\nconst sd = $getWorkflowStaticData('global');\nsd.seen = sd.seen || {};\nconst ev = $('Verify signature').first().json.event;\nsd.seen[ev.event_id] = Date.now();\nconst ks = Object.keys(sd.seen);\nif (ks.length > 500) ks.sort((x, y) => sd.seen[x] - sd.seen[y]).slice(0, ks.length - 500).forEach((k) => delete sd.seen[k]);\nreturn [{ json: { handled: true, event_id: ev.event_id, ...( $input.first() ? { upstream: $input.first().json.statusCode ?? null } : {}) } }];\n"
-      }
-    },
-    {
-      "id": "sentinelIntake0001-10",
-      "name": "Digest only (no action)",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1200,
-        120
-      ],
-      "parameters": {
-        "jsCode": "\n// Record the event as handled only AFTER success, so a failed delivery is retried by the outbox, not swallowed.\nconst sd = $getWorkflowStaticData('global');\nsd.seen = sd.seen || {};\nconst ev = $('Verify signature').first().json.event;\nsd.seen[ev.event_id] = Date.now();\nconst ks = Object.keys(sd.seen);\nif (ks.length > 500) ks.sort((x, y) => sd.seen[x] - sd.seen[y]).slice(0, ks.length - 500).forEach((k) => delete sd.seen[k]);\nreturn [{ json: { handled: true, event_id: ev.event_id, ...( $input.first() ? { upstream: $input.first().json.statusCode ?? null } : {}) } }];\n"
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "sentinelIntake0001-11",
+      "name": "Check dry-run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        -20
+      ],
+      "parameters": {
+        "jsCode": "\nconst r = $input.first().json;\nif (r.statusCode >= 500) throw new Error('dry-run failed with HTTP ' + r.statusCode);\n// 2xx = done; 4xx (e.g. 409 blocked / not eligible) is a definite answer from the API, not something a retry fixes\nreturn [{ json: { dry_run_status: r.statusCode, body: JSON.parse(JSON.stringify(r.body ?? null)) } }];\n"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelIntake0001-12",
+      "name": "Seen before?",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        500,
+        -140
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SENTINEL_API }}/internal/events/{{ encodeURIComponent($json.event.event_id) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelIntake0001-13",
+      "name": "Check seen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        650,
+        -140
+      ],
+      "parameters": {
+        "jsCode": "\nconst r = $input.first().json;\nif (r.statusCode !== 200) throw new Error('dedupe lookup answered HTTP ' + r.statusCode);\nreturn [{ json: { duplicate: !!(r.body && r.body.seen) } }];\n"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelIntake0001-14",
+      "name": "Mark seen (API)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1800,
+        40
+      ],
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $env.SENTINEL_API }}/internal/events/{{ encodeURIComponent($node['Verify signature'].json.event.event_id) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ workflow: 'intake' }) }}"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelIntake0001-15",
+      "name": "Mark handled",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1950,
+        40
+      ],
+      "parameters": {
+        "jsCode": "\nconst r = $input.first().json;\nif (r.statusCode !== 200) throw new Error('marking the event seen answered HTTP ' + r.statusCode);\nreturn [{ json: { handled: true } }];\n"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelIntake0001-16",
       "name": "Respond 200",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        1600,
+        2200,
         40
       ],
       "parameters": {
@@ -278,9 +399,251 @@
           "responseCode": 200
         }
       }
+    },
+    {
+      "id": "sentinelIntake0001-17",
+      "name": "Build digest message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        140
+      ],
+      "parameters": {
+        "jsCode": "const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst sm = (() => { try { const b = $('Summarize case').first().json.body; return b && b.summary ? b : null; } catch (e) { return null; } })();\n\n// Only cases that need a human produce a Slack message; dismissed/legitimate ones stay silent (digest only, no action).\nconst k = $('Check case').first().json;\nconst rec = k.content.recommendation;\nif (rec.route !== 'review') return [{ json: { slack_text: '' } }];\nconst a = k.content.attribution;\nconst lines = [`:mag: *Needs human review* \\u2014 ${esc(k.content.workload)} (${esc(k.tenant_id)})`,\n  `case \\`${esc(k.case_id)}\\` \\u00b7 ${esc(k.content.assessment.classification)} \\u00b7 owner: ${esc(a.owner || 'unknown')} (confidence ${esc(a.confidence)})`,\n  '_Alert only: nothing has been changed, and nothing can be approved until ownership is resolved._', ''];\nif (sm && sm.briefing) lines.push(sm.briefing);\nelse lines.push('why: ' + k.content.assessment.reasons.map(esc).join('; '), `projected: ${esc(rec.projected_savings.monthly)} USD/month (projected, not realized)`);\n\nif (sm) lines.push('', '*Investigation summary* (' + (sm.source === 'llm' ? 'AI-written from verified evidence, every number and id fact-checked' : 'built from verified evidence') + '):\\n' + esc(sm.summary));\ntry { lines.push('', '_ref ' + $('Verify signature').first().json.event.event_id + '_'); } catch (e) { /* no reference available */ }\nreturn [{ json: { slack_text: lines.join('\\n') } }];\n"
+      }
+    },
+    {
+      "id": "sentinelIntake0001-18",
+      "name": "Needs review?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1300,
+        140
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.content.recommendation.route === 'review' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "sentinelIntake0001-19",
+      "name": "Summarize case",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        220
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SENTINEL_API }}/cases/{{ encodeURIComponent($node['Verify signature'].json.event.case_id) }}/summary",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "sentinelIntake0001-20",
+      "name": "Review: Slack on?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1500,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ !!$env.SENTINEL_SLACK_WEBHOOK_URL && !!$json.slack_text }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "sentinelIntake0001-21",
+      "name": "Review: Post to Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1700,
+        140
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SENTINEL_SLACK_WEBHOOK_URL }}",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.slack_text }) }}"
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelIntake0001-22",
+      "name": "Review: Check Slack",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1900,
+        140
+      ],
+      "parameters": {
+        "jsCode": "\n// Slack incoming webhooks answer 200 \"ok\". Temporary trouble (429/5xx/network) is retried; a 4xx is permanent\n// (bad URL / revoked webhook): it is surfaced in the execution but never retried forever.\nconst r = $input.first().json; const c = Number(r.statusCode || 0);\nif (c === 0 || c === 429 || c >= 500) throw new Error('Slack temporary failure HTTP ' + c);\nreturn [{ json: { slack_status: c, slack_ok: c === 200, slack_error: c === 200 ? null : String(r.body || '').slice(0, 120) } }];\n"
+      },
+      "onError": "continueErrorOutput"
     }
   ],
   "connections": {
+    "Seen before?": {
+      "main": [
+        [
+          {
+            "node": "Check seen",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check seen": {
+      "main": [
+        [
+          {
+            "node": "Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark seen (API)": {
+      "main": [
+        [
+          {
+            "node": "Mark handled",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark handled": {
+      "main": [
+        [
+          {
+            "node": "Respond 200",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "Case event": {
       "main": [
         [
@@ -307,7 +670,7 @@
       "main": [
         [
           {
-            "node": "Duplicate?",
+            "node": "Seen before?",
             "type": "main",
             "index": 0
           }
@@ -343,7 +706,32 @@
       "main": [
         [
           {
+            "node": "Check case",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check case": {
+      "main": [
+        [
+          {
             "node": "Route = dry_run?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
             "type": "main",
             "index": 0
           }
@@ -361,7 +749,101 @@
         ],
         [
           {
-            "node": "Digest only (no action)",
+            "node": "Needs review?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs review?": {
+      "main": [
+        [
+          {
+            "node": "Summarize case",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark seen (API)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize case": {
+      "main": [
+        [
+          {
+            "node": "Build digest message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build digest message": {
+      "main": [
+        [
+          {
+            "node": "Review: Slack on?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review: Slack on?": {
+      "main": [
+        [
+          {
+            "node": "Review: Post to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark seen (API)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review: Post to Slack": {
+      "main": [
+        [
+          {
+            "node": "Review: Check Slack",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review: Check Slack": {
+      "main": [
+        [
+          {
+            "node": "Mark seen (API)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
             "type": "main",
             "index": 0
           }
@@ -372,29 +854,32 @@
       "main": [
         [
           {
-            "node": "Finish",
+            "node": "Check dry-run",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Finish": {
+    "Check dry-run": {
       "main": [
         [
           {
-            "node": "Respond 200",
+            "node": "Mark seen (API)",
             "type": "main",
             "index": 0
           }
-        ]
-      ]
-    },
-    "Digest only (no action)": {
-      "main": [
+        ],
         [
           {
-            "node": "Respond 200",
+            "node": "Respond 500 (outbox will retry)",
             "type": "main",
             "index": 0
           }

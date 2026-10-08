@@ -11,7 +11,7 @@ from app.assess import ActionIntent, assess
 from app.attribute import attribute_group, attribute_resource
 from app.detect import analyze_series, idle_ec2, unattached_ebs
 from app.security import canonical, sha256_hex, sign, target_set_hash, verify
-from app.states import TRANSITIONS, InvalidTransition, transition
+from app.states import NOTIFY_STATES, TRANSITIONS, InvalidTransition, notify_payload, transition
 
 WE = date(2026, 10, 8)
 
@@ -186,3 +186,16 @@ def test_state_machine_has_no_jump_to_execution():
         transition(None, "t", "c", "NEW", "EXECUTED", "x")
     with pytest.raises(InvalidTransition):
         transition(None, "t", "c", "INVESTIGATED", "APPROVED", "x")
+
+
+def test_notification_payload_is_small_whitelisted_and_secret_free():
+    content = {"workload": "batch-dev", "kind": "idle-ec2", "attribution": {"owner": "payments-platform"}, "assessment": {"classification": "probable_waste"},
+               "recommendation": {"risk": "low", "projected_savings": {"monthly": "420.0000"}}}
+    detail = {"reasons": ["x" * 500] * 9, "note": "n", "matched_ids": ["i-aaaaaaaa"], "verification": {"ok": True, "resources": [{"big": "..."}]},
+              "policy_yaml": "SECRET-ISH", "actor_proof": "1111"}
+    p = notify_payload("payments", "case_x", 3, "EXECUTED", "VERIFIED", "system:verifier", content, detail)
+    assert p["to_state"] == "VERIFIED" and p["summary"]["owner"] == "payments-platform" and p["summary"]["projected_monthly"] == "420.0000"
+    assert len(p["detail"]["reasons"]) == 5 and len(p["detail"]["reasons"][0]) == 200 and p["detail"]["verification_ok"] is True
+    assert "policy_yaml" not in str(p) and "actor_proof" not in str(p) and "1111" not in str(p)
+    assert {"PENDING", "NEW", "INVESTIGATED", "DRY_RUN", "DISMISSED", "EXECUTED"}.isdisjoint(NOTIFY_STATES)
+    assert {"REFUSED", "APPROVED", "REJECTED", "EXPIRED", "VERIFIED", "EXECUTION_FAILED"} <= NOTIFY_STATES

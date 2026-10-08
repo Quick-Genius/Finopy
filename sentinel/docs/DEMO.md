@@ -17,9 +17,9 @@ CloudQuery syncs LocalStack into PostgreSQL; the API creates cases. Expect appro
 
 **2:10 – human approval (25 s).** Click *Open approval form (n8n)*: tenant, owner, exact targets, savings + assumptions, risk, rollback, both hashes, expiry. First enter a wrong PIN → refused and audited; then `payments-approver` / `1111` → Approve.
 
-**2:35 – act and verify (25 s).** The case goes `APPROVED → EXECUTED → VERIFIED` within seconds: runner exit 0, matched ids equal the approved ids, and the verification table shows the live `finops_mark` tag now present. Replay the same callback (`python3 scripts/e2e.py` does this) → `replayed:true`, still one execution. Switch persona to *Anil (Analytics)*: the Payments case id returns 404.
+**2:35 – a human fixes it; the system doesn't (25 s).** Default mode is alert-only: after the approval the case shows `APPROVED`, the audit shows `approval.recorded_no_action`, **no execution exists** and no instance in LocalStack is tagged or changed. Replay the same callback (`python3 scripts/e2e.py` does this) → `replayed:true`. Switch persona to *Anil (Analytics)*: the Payments case id returns 404. (Want the old executed-and-verified loop? Set `ACTION_MODE=tag_after_approval` in `.env`, then `./scripts/reset.sh`.)
 
-Hands-free alternative: `./scripts/replay.sh` resets, runs everything above and prints 33 PASS/FAIL lines.
+Hands-free alternative: `./scripts/replay.sh` resets, runs everything above and prints every PASS/FAIL check.
 
 ## Measured (this machine, 2026-10-08, warm images)
 | Measure | Result |
@@ -38,5 +38,9 @@ Hands-free alternative: `./scripts/replay.sh` resets, runs everything above and 
 - **Escalation = `EXPIRED` + audit + dashboard queue**; no Slack/email notification, no two-person gate for high risk, no "ticket-only" route for destroy proposals.
 - **LLM:** none is wired. The intent proposer is deterministic; `ActionIntent` is the validated entry point if one is added.
 - **CloudQuery:** AWS plugin pinned at v22.19.2 (older than the hub's latest); PostgreSQL destination built from source because the hub requires a login; arm64 only was exercised. LocalStack is pinned to 4.14.0 because 2026.09.x needs an account token.
-- **Operational:** workers (outbox, executor, sweeper) are threads in one API process; one runner; no rate limiting/pagination; n8n dedupe store is workflow static data (bounded to 500 ids); stale `running` executions become `inconclusive` on restart and are not retried.
+- **Operational:** workers (outbox, executor, sweeper) are threads in one API process; one runner; no rate limiting/pagination; stale `running` executions become `inconclusive` on restart and are not retried.
 - **Dashboard:** builds, serves, proxies, and every data path was checked against live API responses, but I had no browser available in this session, so it has **not been visually inspected**.
+
+
+## Slack alert (what judges see in the channel)
+Six messages per demo run (alert-only): *Needs human review* (ambiguous owner), two *Approval needed* (with the n8n form link), *REFUSED* (protected resource), then *APPROVED* ("the system made NO change") and *REJECTED*. In the optional tag mode a *VERIFIED* message follows too. Alerts that need a person (review, approval, refused, failed, expired) carry the full structure: **Issue / Has to be fixed / Recommendation / Stats (text charts) / Who acts**, plus the fact-checked AI note. Short outcome messages (approved, rejected) stay short. Every message ends with a `ref` id, so a duplicate would be obvious. Every message says it is an alert: nothing is changed or fixed automatically.

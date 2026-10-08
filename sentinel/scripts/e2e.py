@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -21,7 +22,10 @@ from datetime import datetime, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ENV = dict(l.split("=", 1) for l in (ROOT / ".env").read_text().splitlines() if "=" in l and not l.startswith("#"))
-API, N8N, LS = "http://localhost:8000", "http://localhost:5678", "http://localhost:4566"
+ALERT_ONLY = ENV.get("ACTION_MODE", "alert_only") != "tag_after_approval"     # the default: the system never changes anything
+API = f"http://localhost:{ENV.get('API_HOST_PORT', '8000')}"
+N8N = f"http://localhost:{ENV.get('N8N_HOST_PORT', '5678')}"
+LS = f"http://localhost:{ENV.get('LOCALSTACK_HOST_PORT', '4566')}"
 LOG, FAILS = [], []
 
 
@@ -107,6 +111,15 @@ def localstack_tags():
     return out
 
 
+
+def deliver(path, ev):
+    """Deliver a correctly SIGNED event to an n8n webhook, exactly as the API outbox does. Returns (status, body)."""
+    raw = canonical(ev).encode()
+    ts = str(int(time.time()))
+    sig = hmac.new(ENV["N8N_HMAC_SECRET"].encode(), f"{ts}.".encode() + raw, hashlib.sha256).hexdigest()
+    return http("POST", f"{N8N}/webhook/{path}", {"content-type": "application/json", "x-sentinel-timestamp": ts, "x-sentinel-signature": sig}, raw)
+
+
 def trigger_run():
     for _ in range(30):                      # webhooks register a moment after n8n reports healthy
         code, body = http("POST", f"{N8N}/webhook/sentinel-run-now", {"x-run-now-secret": ENV["RUN_NOW_SECRET"]})
@@ -123,6 +136,59 @@ def states(pid):
 def pending_ready(pid, cid):
     d = case(pid, cid)
     return d if d and d["state"] == "PENDING" and (d["approval"] or {}).get("form_url") else None
+
+
+def slack_check():
+    """Only runs when scripts/slack_mock.sh is up AND n8n was started with SLACK_WEBHOOK_URL pointing at it."""
+    r = subprocess.run(["docker", "exec", "slack-mock", "cat", "/tmp/slack.log"], capture_output=True, text=True)
+    if r.returncode:
+        say("\n== 10. Slack: skipped (no slack-mock running; set SLACK_WEBHOOK_URL to test)")
+        return
+    time.sleep(6)
+    msgs = [json.loads(l)["text"] for l in subprocess.run(["docker", "exec", "slack-mock", "cat", "/tmp/slack.log"], capture_output=True, text=True).stdout.splitlines() if l.strip()]
+    say(f"\n== 10. Slack notifications received by the stand-in webhook ({len(msgs)})")
+    for m in msgs:
+        say("    --- " + m.replace("\n", "\n        "))
+    need = {"approval needed": "Approval needed", "needs review": "Needs human review", "REFUSED": "*REFUSED*", "APPROVED": "*APPROVED*", "REJECTED": "*REJECTED*"}
+    if not ALERT_ONLY:
+        need["VERIFIED"] = "*VERIFIED*"
+    else:
+        check("alert-only: the APPROVED message says the system made NO change", "NO change" in next((m for m in msgs if "*APPROVED*" in m), ""))
+        check("alert-only: nothing was ever announced as executed or verified", not any("*VERIFIED*" in m or "*EXECUTED*" in m for m in msgs if "slack-ping" not in m))
+    for name, needle in need.items():
+        check(f"Slack got a '{name}' message", any(needle in m for m in msgs))
+    sections = ("*Issue*", "*Has to be fixed*", "*Recommendation*", "*Stats*", "```", "*Who acts:*", "Alert only")
+    by = lambda needle: next((m for m in msgs if needle in m), "")
+    for label, needle in (("approval-needed", "Approval needed"), ("needs-review", "Needs human review"), ("REFUSED", "*REFUSED*")):
+        missing = [s for s in sections if s not in by(needle)]
+        check(f"{label} message is structured: Issue / Has to be fixed / Recommendation / Stats / Who acts", not missing, f"missing {missing}")
+    check("approval message includes the text charts (cost sparkline + CPU bars)", "cost/day (14d)" in by("Approval needed") and "CPU " in by("Approval needed") and "█" in by("Approval needed"))
+    check("every message says it is an alert (nothing fixed automatically)", all("Alert only" in m for m in msgs if "slack-ping" not in m), f"{sum('Alert only' in m for m in msgs)} of {len(msgs)}")
+    check("short outcome messages (APPROVED / VERIFIED) stay short: no full briefing", "*Stats*" not in by("*APPROVED*") and "*Stats*" not in by("*VERIFIED*"))
+    check("approval message carries the n8n form link", any("approval form" in m and "/form-waiting/" in m for m in msgs))
+    check("no secrets in any Slack message (PIN, HMAC secret, API token)", not any(s in "\n".join(msgs) for s in ("1111", "3333", ENV["N8N_HMAC_SECRET"], ENV["N8N_API_TOKEN"])))
+    llm = subprocess.run(["docker", "exec", "llm-mock", "cat", "/tmp/llm.log"], capture_output=True, text=True)
+    if llm.returncode == 0 and llm.stdout.strip():
+        reqs = llm.stdout
+        say(f"    LLM stand-in received {len(reqs.splitlines())} requests")
+        check("Slack messages carry an investigation summary written by the LLM", sum("Investigation summary" in m and "AI-written" in m for m in msgs) >= 5, f"{sum('AI-written' in m for m in msgs)} of {len(msgs)}")
+        leaked = [s for s in ("1111", "3333", "policy_yaml", "sha256", "actor_proof", ENV["N8N_HMAC_SECRET"], ENV["N8N_API_TOKEN"], ENV["RUNNER_HMAC_SECRET"]) if s in reqs]
+        check("nothing secret was sent to the LLM (PINs, hashes, policy text, tokens, secrets)", not leaked, str(leaked))
+    refs = [r for m in msgs for r in re.findall(r"_ref (evt_[A-Za-z0-9_]+)_", m)]
+    check("every Slack message carries a ref id", len(refs) == len([m for m in msgs if "slack-ping" not in m]), f"{len(refs)} refs / {len(msgs)} messages")
+    check("no Slack message was delivered twice (all refs unique)", len(set(refs)) == len(refs), f"{len(refs)} refs, {len(set(refs))} unique")
+    check("each outcome was announced exactly once", (ALERT_ONLY or sum("*VERIFIED*" in m for m in msgs) == 1) and sum("*REFUSED*" in m for m in msgs) == 1, f"{len(msgs)} messages")
+
+
+def slack_ping():
+    say("== Slack ping: deliver one signed test event to the notify workflow (appears in your channel if SLACK_WEBHOOK_URL is set)")
+    ev = {"event_id": "evt_slackping_" + uuid.uuid4().hex[:10], "event_type": "case.state_changed", "schema_version": "1.0", "tenant_id": "payments",
+          "case_id": "case_payments_slack-ping-test", "case_version": 1, "from_state": "EXECUTED", "to_state": "VERIFIED", "actor": "system:slack-ping",
+          "detail": {"verification_ok": True, "matched_ids": ["i-0000000000000000"]},
+          "summary": {"workload": "slack-ping (TEST, not a real case)", "owner": "payments-platform", "risk": "low", "projected_monthly": "0.0000", "currency": "USD"}}
+    code, body = deliver("sentinel-notify", ev)
+    check("notify workflow handled the test event", code == 200 and isinstance(body, dict) and body.get("handled") is True, f"HTTP {code} {body}")
+    say("   If Slack is configured you should see a message in the channel within a second or two.")
 
 
 def main():
@@ -177,6 +243,30 @@ def main():
     check("stale timestamp rejected (replay window)", callback(forged, ts=int(time.time()) - 1000)[0] == 401)
     check("Analytics case still PENDING after all forged attempts", states("analytics-analyst")[aid] == "PENDING")
 
+    say("\n== 4b. n8n-side failures must answer 5xx (outbox retries) and must NOT be marked as handled")
+    bogus_case = {"event_id": "evt_bogus_case_" + uuid.uuid4().hex[:8], "event_type": "case.created", "case_id": "case_payments_does-not-exist", "tenant_id": "payments"}
+    c1, _ = deliver("sentinel-case", bogus_case)
+    c2, _ = deliver("sentinel-case", bogus_case)
+    check("intake: API fetch fails -> HTTP 500, not a silent 200", c1 == 500, f"HTTP {c1}")
+    check("intake: the same event is retried (not swallowed as a duplicate)", c2 == 500, f"HTTP {c2}")
+    bogus_apr = {"event_id": "evt_bogus_apr_" + uuid.uuid4().hex[:8], "event_type": "approval.requested", "approval_id": "apr_0123456789ab", "tenant_id": "payments", "case_id": "case_payments_does-not-exist"}
+    a1, _ = deliver("sentinel-approval", bogus_apr)
+    a2, _ = deliver("sentinel-approval", bogus_apr)
+    check("approval: packet fetch fails -> HTTP 500 and the event stays retryable", (a1, a2) == (500, 500), f"HTTP {a1}/{a2}")
+    evil = {"event_id": "evt_malformed_" + uuid.uuid4().hex[:8], "event_type": "case.created", "case_id": "case_x/../../internal/events/evt_x", "tenant_id": "payments"}
+    m1, mb = deliver("sentinel-case", evil)
+    check("signed event with a path-traversal case_id is rejected before any API call", m1 == 401 and "malformed" in str(mb), f"HTTP {m1} {mb}")
+    for bad in ("/cases/bad.id", "/cases/case_x%20y", "/approvals/apr_XYZ", "/approvals/..%2Fcases"):
+        check(f"API refuses malformed path {bad}", get(bad, "payments-analyst")[0] in (404, 422), f"HTTP {get(bad, 'payments-analyst')[0]}")
+    # n8n's seen-set lives in workflow static data, saved whole at the end of each execution, so under concurrent delivery it is
+    # best-effort. Sequential delivery of a side-effect-free event (the dismissed case = digest-only route) proves the mechanism.
+    safe = {"event_id": "evt_dedupe_probe_" + uuid.uuid4().hex[:8], "event_type": "case.created", "case_id": "case_payments_checkout-api-spend-anomaly", "tenant_id": "payments"}
+    d1, b1 = deliver("sentinel-case", safe)
+    time.sleep(1)
+    d2, b2 = deliver("sentinel-case", safe)
+    check("intake: first delivery of a digest-only event is handled (200, no action)", d1 == 200 and isinstance(b1, dict) and b1.get("handled") is True, f"HTTP {d1} {b1}")
+    check("intake: sequential re-delivery of the same event_id is a duplicate no-op", d2 == 200 and isinstance(b2, dict) and b2.get("duplicate") is True, f"HTTP {d2} {b2}")
+
     say("\n== 5. human approval through the n8n form (first with a WRONG pin)")
     form = a["form_url"]
     c, _ = submit_form(form, "payments-approver", "0000", "approve")
@@ -187,41 +277,72 @@ def main():
     say("   now the real approver submits the same form")
     c, _ = submit_form(form, "payments-approver", "1111", "approve", "e2e proof")
     check("form accepted", c == 200, f"HTTP {c}")
-    done = wait_for(lambda: (lambda d: d if d and d["state"] in ("VERIFIED", "VERIFICATION_FAILED", "EXECUTION_FAILED") else None)(case("payments-analyst", "case_payments_batch-dev-idle-ec2")), 120)
-    check("case reached VERIFIED", bool(done) and done["state"] == "VERIFIED", done["state"] if done else "timeout")
-    ex = done["execution"]
-    say(f"    execution {ex['execution_id']} status={ex['status']} exit={ex['exit_code']} matched={ex['matched_ids']}")
-    say(f"    approver={done['approval']['actor_id']} role={done['approval']['actor_role']} decided={done['approval']['decided_at']}")
-    for r in ex["verification"]["resources"]:
-        say(f"    verify {r['resource_id']}: {r['expected_tag']} = {r['observed']!r} (changed={r['changed']})")
-    check("runner matched exactly the approved targets, exit 0", ex["matched_ids"] == p["target_ids"] and ex["exit_code"] == 0)
+    if ALERT_ONLY:
+        done = wait_for(lambda: (lambda d: d if d and d["state"] == "APPROVED" else None)(case("payments-analyst", "case_payments_batch-dev-idle-ec2")), 60)
+        check("approval recorded: case is APPROVED with the human's identity on record", bool(done) and done["approval"]["actor_id"] == "payments-approver", done["state"] if done else "timeout")
+        check("ALERT-ONLY: no execution was created and nothing was run", done["execution"] is None)
+        say(f"    approver={done['approval']['actor_id']} role={done['approval']['actor_role']} decided={done['approval']['decided_at']}")
+        say("\n== 6. live resource state in LocalStack must be UNTOUCHED (alert-only: the system fixes nothing)")
+        after = localstack_tags()
+        for iid, v in after.items():
+            say(f"    {iid} {v['name']:24} {v['state']:8} finops_mark={v['finops_mark']}")
+        check("no instance was changed or tagged, all still running", all(v["finops_mark"] is None and v["state"] == "running" for v in after.values()))
+        r = subprocess.run(["docker", "compose", "exec", "-T", "api", "python", "-c",
+                            "import httpx\nfrom app import runner_client\ntry:\n runner_client.call('/execute', {'target_ids': [], 'policy_yaml': 'x'})\nexcept httpx.HTTPStatusError as e:\n print('HTTP', e.response.status_code)"],
+                           cwd=ROOT, capture_output=True, text=True)
+        check("the isolated runner itself refuses to execute in alert-only mode", "HTTP 403" in r.stdout, r.stdout.strip() or r.stderr.strip()[-120:])
+        say("\n== 7. duplicate callback / replay does nothing")
+        key = f"{a['approval_id']}:approve:payments-approver"
+        dup = {**forged, "approval_id": a["approval_id"], "case_id": "case_payments_batch-dev-idle-ec2", "actor_id": "payments-approver",
+               "actor_proof": "1111", "case_version": pay["version"], "policy_sha256": a["policy_sha256"], "target_set_sha256": a["target_set_sha256"],
+               "expires_at": a["expires_at"], "idempotency_key": key}
+        c, r = callback(dup)
+        check("same idempotency key returns the earlier result, flagged replayed", c == 200 and r.get("replayed") is True, f"HTTP {c} {r}")
+        c, r = callback({**dup, "idempotency_key": "another-" + uuid.uuid4().hex})
+        check("fresh key on an already-decided approval is refused", c == 409, f"HTTP {c}")
+        c, _ = submit_form(form, "payments-approver", "1111", "approve")
+        time.sleep(3)
+        d2 = case("payments-analyst", "case_payments_batch-dev-idle-ec2")
+        check("re-clicking the n8n form is a no-op", d2["state"] == "APPROVED" and d2["execution"] is None, f"form HTTP {c}")
+        n_exec = int(subprocess.run(["docker", "compose", "exec", "-T", "postgres", "psql", "-U", "sentinel", "-d", "sentinel", "-At", "-c",
+                                     "select count(*) from executions"], cwd=ROOT, capture_output=True, text=True).stdout.strip() or -1)
+        check("database holds ZERO executions in total", n_exec == 0, str(n_exec))
+    else:
+        done = wait_for(lambda: (lambda d: d if d and d["state"] in ("VERIFIED", "VERIFICATION_FAILED", "EXECUTION_FAILED") else None)(case("payments-analyst", "case_payments_batch-dev-idle-ec2")), 120)
+        check("case reached VERIFIED", bool(done) and done["state"] == "VERIFIED", done["state"] if done else "timeout")
+        ex = done["execution"]
+        say(f"    execution {ex['execution_id']} status={ex['status']} exit={ex['exit_code']} matched={ex['matched_ids']}")
+        say(f"    approver={done['approval']['actor_id']} role={done['approval']['actor_role']} decided={done['approval']['decided_at']}")
+        for r in ex["verification"]["resources"]:
+            say(f"    verify {r['resource_id']}: {r['expected_tag']} = {r['observed']!r} (changed={r['changed']})")
+        check("runner matched exactly the approved targets, exit 0", ex["matched_ids"] == p["target_ids"] and ex["exit_code"] == 0)
 
-    say("\n== 6. live resource state in LocalStack AFTER the action (independent read)")
-    after = localstack_tags()
-    for iid, v in after.items():
-        say(f"    {iid} {v['name']:24} {v['state']:8} finops_mark={v['finops_mark']}")
-    marked = sorted(i for i, v in after.items() if v["finops_mark"])
-    check("exactly the two approved instances are marked, and still running (non-destructive)", marked == p["target_ids"]
-          and all(after[i]["state"] == "running" for i in after))
-    check("protected DR instance untouched", all(v["finops_mark"] is None for v in after.values() if v["name"] == "payments-dr-standby"))
+        say("\n== 6. live resource state in LocalStack AFTER the action (independent read)")
+        after = localstack_tags()
+        for iid, v in after.items():
+            say(f"    {iid} {v['name']:24} {v['state']:8} finops_mark={v['finops_mark']}")
+        marked = sorted(i for i, v in after.items() if v["finops_mark"])
+        check("exactly the two approved instances are marked, and still running (non-destructive)", marked == p["target_ids"]
+              and all(after[i]["state"] == "running" for i in after))
+        check("protected DR instance untouched", all(v["finops_mark"] is None for v in after.values() if v["name"] == "payments-dr-standby"))
 
-    say("\n== 7. duplicate callback / replay does nothing")
-    key = f"{a['approval_id']}:approve:payments-approver"          # the key n8n derived for the real click
-    dup = {**forged, "approval_id": a["approval_id"], "case_id": "case_payments_batch-dev-idle-ec2", "actor_id": "payments-approver",
-           "actor_proof": "1111", "case_version": pay["version"], "policy_sha256": a["policy_sha256"], "target_set_sha256": a["target_set_sha256"],
-           "expires_at": a["expires_at"], "idempotency_key": key}
-    c, r = callback(dup)
-    check("same idempotency key returns the earlier result, flagged replayed", c == 200 and r.get("replayed") is True, f"HTTP {c} {r}")
-    c, r = callback({**dup, "idempotency_key": "another-" + uuid.uuid4().hex})
-    check("fresh key on an already-decided approval is refused (no second execution)", c == 409, f"HTTP {c} {r.get('error') if isinstance(r, dict) else r}")
-    c, _ = submit_form(form, "payments-approver", "1111", "approve")
-    time.sleep(3)
-    d2 = case("payments-analyst", "case_payments_batch-dev-idle-ec2")
-    check("re-clicking the n8n form is a no-op", d2["execution"]["execution_id"] == ex["execution_id"] and d2["state"] == "VERIFIED", f"form HTTP {c}")
-    check("LocalStack unchanged by the duplicates", localstack_tags() == after)
-    n_exec = int(subprocess.run(["docker", "compose", "exec", "-T", "postgres", "psql", "-U", "sentinel", "-d", "sentinel", "-At", "-c",
-                                 "select count(*) from executions where case_id='case_payments_batch-dev-idle-ec2'"], cwd=ROOT, capture_output=True, text=True).stdout.strip() or -1)
-    check("database holds exactly ONE execution for the case", n_exec == 1, str(n_exec))
+        say("\n== 7. duplicate callback / replay does nothing")
+        key = f"{a['approval_id']}:approve:payments-approver"          # the key n8n derived for the real click
+        dup = {**forged, "approval_id": a["approval_id"], "case_id": "case_payments_batch-dev-idle-ec2", "actor_id": "payments-approver",
+               "actor_proof": "1111", "case_version": pay["version"], "policy_sha256": a["policy_sha256"], "target_set_sha256": a["target_set_sha256"],
+               "expires_at": a["expires_at"], "idempotency_key": key}
+        c, r = callback(dup)
+        check("same idempotency key returns the earlier result, flagged replayed", c == 200 and r.get("replayed") is True, f"HTTP {c} {r}")
+        c, r = callback({**dup, "idempotency_key": "another-" + uuid.uuid4().hex})
+        check("fresh key on an already-decided approval is refused (no second execution)", c == 409, f"HTTP {c} {r.get('error') if isinstance(r, dict) else r}")
+        c, _ = submit_form(form, "payments-approver", "1111", "approve")
+        time.sleep(3)
+        d2 = case("payments-analyst", "case_payments_batch-dev-idle-ec2")
+        check("re-clicking the n8n form is a no-op", d2["execution"]["execution_id"] == ex["execution_id"] and d2["state"] == "VERIFIED", f"form HTTP {c}")
+        check("LocalStack unchanged by the duplicates", localstack_tags() == after)
+        n_exec = int(subprocess.run(["docker", "compose", "exec", "-T", "postgres", "psql", "-U", "sentinel", "-d", "sentinel", "-At", "-c",
+                                     "select count(*) from executions where case_id='case_payments_batch-dev-idle-ec2'"], cwd=ROOT, capture_output=True, text=True).stdout.strip() or -1)
+        check("database holds exactly ONE execution for the case", n_exec == 1, str(n_exec))
 
     say("\n== 8. rejection closes the gate (Analytics)")
     c, _ = submit_form(aa and ana["approval"]["form_url"], "analytics-approver", "3333", "reject", "not now")
@@ -231,6 +352,7 @@ def main():
     say("\n== 9. tenant-scoped audit export")
     rows = [json.loads(l) for l in http("GET", API + "/audit/export", tok("payments-analyst"))[1].splitlines() if l]
     check("Payments export contains only Payments events", {r["tenant_id"] for r in rows} == {"payments"}, f"{len(rows)} events")
+    slack_check()
     say("\n   timeline (batch-dev):")
     for x in done["audit"]:
         say(f"     {x['created_at'][11:23]} {x['event_type']:26} {x['from_state'] or '':12}-> {x['to_state'] or '':12} {x['actor']}")
@@ -275,6 +397,9 @@ def outbox():
     subprocess.run(["docker", "compose", "start", "n8n"], cwd=ROOT, capture_output=True)
     ok = wait_for(lambda: pending_ready("payments-analyst", "case_payments_batch-dev-idle-ec2"), 240, 4)
     check("after n8n returns the backlog is delivered and the case reaches PENDING", bool(ok))
+    drain = lambda: subprocess.run(["docker", "compose", "exec", "-T", "postgres", "psql", "-U", "sentinel", "-d", "sentinel", "-At", "-c",
+                                    "select count(*) from outbox where delivered_at is null"], cwd=ROOT, capture_output=True, text=True).stdout.strip() == "0"
+    check("the backlog drains completely (every queued event is eventually delivered)", bool(wait_for(drain, 120, 3)))
     q2 = ("select (select count(*) from cases), (select count(*) from policies), (select count(*) from approvals),"
           " (select count(*) from (select case_id from policies group by case_id having count(*) > 1) a),"
           " (select count(*) from outbox where delivered_at is null)")
@@ -286,7 +411,7 @@ def outbox():
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
-    {"--expiry": expiry, "--outbox": outbox}.get(mode, main)()
+    {"--expiry": expiry, "--outbox": outbox, "--slack-ping": slack_ping}.get(mode, main)()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     (ROOT / "proof").mkdir(exist_ok=True)
     (ROOT / "proof" / f"e2e{mode.replace('--', '-')}-{stamp}.log").write_text("\n".join(LOG) + "\n")

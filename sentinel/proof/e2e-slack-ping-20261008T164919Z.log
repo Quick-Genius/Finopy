@@ -1,0 +1,3 @@
+== Slack ping: deliver one signed test event to the notify workflow (appears in your channel if SLACK_WEBHOOK_URL is set)
+  [PASS] notify workflow handled the test event  (HTTP 200 {'ok': True, 'handled': True})
+   If Slack is configured you should see a message in the channel within a second or two.

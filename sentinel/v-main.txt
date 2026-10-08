@@ -1,0 +1,255 @@
+== 1. trigger analysis through n8n (CloudQuery sync -> API analysis -> outbox -> n8n intake -> Custodian dry-run)
+  [PASS] n8n manual webhook accepted  (HTTP 202)
+  [PASS] both approval-ready cases reached PENDING with an n8n form  (2s)
+  [PASS] seeded event -> approval-ready under the 5-minute target  (2s)
+
+== 2. scenario outcomes
+    case_payments_batch-dev-idle-ec2                     PENDING
+    case_payments_checkout-api-spend-anomaly             DISMISSED
+    case_payments_dr-standby-idle-ec2                    REFUSED
+    case_payments_shared-ingest-idle-ec2                 INVESTIGATED
+    case_analytics_notebooks-unattached-ebs              PENDING
+  [PASS] expected Payments spike is DISMISSED as legitimate (not waste)
+  [PASS] normal RDS baseline raised no case
+  [PASS] protected production resource REFUSED before approval
+  [PASS] ambiguous-owner case held as needs_review (no dry-run, no approval)
+    refusal reasons: ['no executable targets remain after guards (1 protected excluded)'] | excluded: [{'reason': 'protected: tag Protected or Environment=production', 'resource_id': 'i-84196579ab1e16c63'}]
+  [PASS] ambiguous case: owner is None, never invented  (conflicting owners: ['payments-platform', 'payments-risk'])
+
+== 3. exact dry-run evidence (Payments safe-action candidate)
+    custodian 0.9.53 dry-run exit 0  targets ['i-214267ad3bf27d3b7', 'i-ba875ca70a5675653']
+    policy sha256     7af7384adc5477be53704a7261b2258d9ea65e4f494df9b8b1a8750ce4c2b0a6
+    target-set sha256 726209f076a4fb22ea0efbe3bd1871e4e737d0720d3272b3811da2938b1068fe
+    projected saving  420.0000 USD/month (projected; realized = not measured)
+  [PASS] exactly two sorted targets, hashes bound to the approval
+  [PASS] policy is a deterministic template (mark-for-op, no delete/terminate)
+  [PASS] LocalStack BEFORE: 6 instances seen, none carries finops_mark  (6 instances)
+
+== 4. cross-tenant denial (Payments identity vs the Analytics case)
+  [PASS] Payments cannot read the Analytics case by guessing its id
+  [PASS] Payments cannot read its audit trail
+  [PASS] Payments cannot dry-run / act on it
+  [PASS] validly-signed n8n callback naming a Payments approver for an Analytics approval is refused  (HTTP 403 {'error': "actor is not a member of the case's tenant"})
+  [PASS] human bearer token cannot call the callback endpoint
+  [PASS] bad signature rejected
+  [PASS] stale timestamp rejected (replay window)
+  [PASS] Analytics case still PENDING after all forged attempts
+
+== 4b. n8n-side failures must answer 5xx (outbox retries) and must NOT be marked as handled
+  [PASS] intake: API fetch fails -> HTTP 500, not a silent 200  (HTTP 500)
+  [PASS] intake: the same event is retried (not swallowed as a duplicate)  (HTTP 500)
+  [PASS] approval: packet fetch fails -> HTTP 500 and the event stays retryable  (HTTP 500/500)
+  [PASS] signed event with a path-traversal case_id is rejected before any API call  (HTTP 401 {'error': 'malformed identifier'})
+  [PASS] API refuses malformed path /cases/bad.id  (HTTP 422)
+  [PASS] API refuses malformed path /cases/case_x%20y  (HTTP 422)
+  [PASS] API refuses malformed path /approvals/apr_XYZ  (HTTP 422)
+  [PASS] API refuses malformed path /approvals/..%2Fcases  (HTTP 404)
+  [PASS] intake: first delivery of a digest-only event is handled (200, no action)  (HTTP 200 {'ok': True, 'handled': True})
+  [PASS] intake: sequential re-delivery of the same event_id is a duplicate no-op  (HTTP 200 {'duplicate': True})
+
+== 5. human approval through the n8n form (first with a WRONG pin)
+  [PASS] wrong PIN does not approve  (form HTTP 200)
+  [PASS] refusal recorded in the tenant audit trail  (['actor identity proof failed'])
+   now the real approver submits the same form
+  [PASS] form accepted  (HTTP 200)
+  [PASS] approval recorded: case is APPROVED with the human's identity on record  (APPROVED)
+  [PASS] ALERT-ONLY: no execution was created and nothing was run
+    approver=payments-approver role=approver decided=2026-10-08T20:18:45.431063+00:00
+
+== 6. live resource state in LocalStack must be UNTOUCHED (alert-only: the system fixes nothing)
+    i-214267ad3bf27d3b7 payments-batch-dev-1     running  finops_mark=None
+    i-ba875ca70a5675653 payments-batch-dev-2     running  finops_mark=None
+    i-84196579ab1e16c63 payments-dr-standby      running  finops_mark=None
+    i-1489e5e0953c237d3 payments-shared-ingest   running  finops_mark=None
+    i-f8c48e3438761d669 payments-api-1           running  finops_mark=None
+    i-a1e838d2ba07f050b analytics-etl-1          running  finops_mark=None
+  [PASS] no instance was changed or tagged, all still running
+  [PASS] the isolated runner itself refuses to execute in alert-only mode  (HTTP 403)
+
+== 7. duplicate callback / replay does nothing
+  [PASS] same idempotency key returns the earlier result, flagged replayed  (HTTP 200 {'state': 'APPROVED', 'outcome': 'approved', 'action_mode': 'alert_only', 'approval_id': 'apr_5a250303d364', 'execution_id': None, 'replayed': True})
+  [PASS] fresh key on an already-decided approval is refused  (HTTP 409)
+  [PASS] re-clicking the n8n form is a no-op  (form HTTP 200)
+  [PASS] database holds ZERO executions in total  (0)
+
+== 8. rejection closes the gate (Analytics)
+  [PASS] Analytics case REJECTED, nothing executed
+
+== 9. tenant-scoped audit export
+  [PASS] Payments export contains only Payments events  (21 events)
+
+== 10. Slack notifications received by the stand-in webhook (6)
+    --- :mag: *Needs human review* — shared-ingest (payments)
+        case `case_payments_shared-ingest-idle-ec2` · needs_review · owner: unknown (confidence 0)
+        _Alert only: nothing has been changed, and nothing can be approved until ownership is resolved._
+        
+        *Issue*
+        • 1 instance(s) look idle: average CPU 2.9% over 7 days (idle threshold 5%).
+        • Owner could not be established: conflicting owners: ['payments-platform', 'payments-risk'].
+        
+        *Has to be fixed*
+        • Ownership records disagree, so nobody can safely act yet.
+        
+        *Recommendation* _(advice for humans; the system fixes nothing by itself)_
+        • Owner and platform team compare the Owner tag with the deployment record and correct whichever is wrong.
+        • Then re-run the analysis. Until ownership is clear, no approval is possible.
+        
+        *Stats*
+        ```
+        cost/day (14d)  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄  $9.00 -> $9.00
+                                   ^^^ analysis window
+        CPU …c237d3     ▄▃▄▃▃▃▁  avg 2.9% (scale 0-10%, idle < 5%)
+        ```
+        
+        *Who acts:* Owner / platform team must resolve ownership. No approval is possible yet.
+        
+        *Investigation summary* (AI-written from verified evidence, every number and id fact-checked):
+        The case for idle EC2 instance i-1489e5e0953c237d3 in workload shared-ingest is under investigation. The owner is not established due to conflicting owners: payments-platform and payments-risk. The instance averaged 2.91% CPU over 7 days, meeting the waste indicator threshold of under 5.0%. Projected monthly savings are $270.0000. No realized savings have been measured, and no action has been taken yet.
+        
+        _ref evt_f1f0fbc232592da528fd_
+    --- :no_entry: *REFUSED* — dr-standby (payments)
+        case `case_payments_dr-standby-idle-ec2` · INVESTIGATED → REFUSED · by n8n-automation
+        _Alert only: this system investigates and informs; people decide and fix._
+        owner: payments-platform · risk: high · projected: 375.0000 USD/month (projected, not realized)
+        reasons: no executable targets remain after guards (1 protected excluded)
+        
+        *Issue*
+        • 1 instance(s) look idle: average CPU 2.9% over 7 days (idle threshold 5%).
+        
+        *Has to be fixed*
+        • Idle-looking resource(s) are protected production: they must not be changed automatically.
+        
+        *Recommendation* _(advice for humans; the system fixes nothing by itself)_
+        • Platform team reviews whether the standby is right-sized (for example a smaller instance type) in a planned change window.
+        • Do not stop it: it is tagged Protected / production.
+        
+        *Stats*
+        ```
+        cost/day (14d)  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄  $12.50 -> $12.50
+                                   ^^^ analysis window
+        CPU …e16c63     ▃▃▂▂▃▄▄  avg 2.9% (scale 0-10%, idle < 5%)
+        ```
+        
+        *Who acts:* No automatic action is allowed on this resource. For human review only.
+        
+        *Investigation summary* (AI-written from verified evidence, every number and id fact-checked):
+        Instance i-84196579ab1e16c63 is classified as probable waste due to averaging 2.87% CPU over 7 days. It is protected by the tag "Protected" or has Environment=production, preventing any action. The dry run was refused because all targets were excluded by guards. Projected monthly savings are $375.0000, but realized savings are not measured. The case state is REFUSED, with no execution or verification performed.
+        
+        _ref evt_5f9ec1b35c8f553692ec_
+    --- :bell: *Approval needed* — payments-platform · tenant *payments*
+        case `case_payments_batch-dev-idle-ec2` v1 · proposed fix: mark-for-stop · risk: low
+        _Alert only: nothing has been changed, and the system will not change anything. A human decides and fixes it by hand._
+        
+        *Issue*
+        • AmazonEC2 spend for *batch-dev* was $54.19 over the last 3 days vs $12.24 expected (+343%).
+        • 2 instance(s) look idle: average CPU 2.1%-2.4% over 7 days (idle threshold 5%).
+        
+        *Has to be fixed*
+        • 2 idle instance(s) cost about $420.00/month while doing almost no work.
+        
+        *Recommendation* _(advice for humans; the system fixes nothing by itself)_
+        • Owner payments-platform confirms the instances are not needed.
+        • If yes, an approver records the decision (for the audit trail) and the owner stops them by hand. The system itself changes nothing.
+        • Realized savings are not measured here.
+        
+        *Stats*
+        ```
+        cost/day (14d)  ▁▁▁▁▁█████████  $4.24 -> $18.19
+                                   ^^^ analysis window
+        3 days expected ███░░░░░░░░░░░ $12.24
+        3 days actual   ██████████████ $54.19
+        CPU …27d3b7     ▂▃▃▃▂▃▂  avg 2.1% (scale 0-10%, idle < 5%)
+        CPU …675653     ▃▃▃▁▂▂▃  avg 2.4% (scale 0-10%, idle < 5%)
+        ```
+        
+        *Who acts:* An approver opens the form and records approve or reject (ID + PIN). Either way the system changes nothing: the owner fixes it by hand.
+        
+        *Exact targets (2):* i-214267ad3bf27d3b7 (payments-batch-dev-1), i-ba875ca70a5675653 (payments-batch-dev-2)
+        *Expires:* 2026-10-08T20:48:24.338239+00:00
+        <http://localhost:15678/form-waiting/9|Open the approval form> — needs approver ID + PIN. Silence expires it; nothing is ever auto-approved.
+        
+        *Investigation summary* (AI-written from verified evidence, every number and id fact-checked):
+        Two EC2 instances, i-214267ad3bf27d3b7 and i-ba875ca70a5675653, show sustained low CPU usage (2.11% and 2.37% over 7 days). Spend anomaly detected: actual $54.19 vs expected $12.24 over 3 days, with an anomaly score of 0.99. Owner payments-platform is attributed with 0.95 confidence based on deployment, naming, and tag evidence. Projected monthly savings are $420.0000 USD. Approval is requested; dry run was valid with no refusals. No realized savings measured.
+        
+        _ref evt_0b3fb1d2088f282a2724_
+    --- :bell: *Approval needed* — analytics-data · tenant *analytics*
+        case `case_analytics_notebooks-unattached-ebs` v1 · proposed fix: tag-for-review · risk: low
+        _Alert only: nothing has been changed, and the system will not change anything. A human decides and fixes it by hand._
+        
+        *Issue*
+        • vol-aa28940e87d7347aa has been unattached for 0 days
+        
+        *Has to be fixed*
+        • An unused storage volume costs about $159.90/month.
+        
+        *Recommendation* _(advice for humans; the system fixes nothing by itself)_
+        • Owner analytics-data confirms the volume is unused.
+        • If unused: snapshot it first, then delete it by hand. The system never deletes anything and changes nothing.
+        
+        *Stats*
+        ```
+        cost/day (14d)  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄  $5.33 -> $5.33
+                                   ^^^ analysis window
+        ```
+        
+        *Who acts:* An approver opens the form and records approve or reject (ID + PIN). Either way the system changes nothing: the owner fixes it by hand.
+        
+        *Exact targets (1):* vol-aa28940e87d7347aa (analytics-notebook-scratch)
+        *Expires:* 2026-10-08T20:48:32.966717+00:00
+        <http://localhost:15678/form-waiting/12|Open the approval form> — needs approver ID + PIN. Silence expires it; nothing is ever auto-approved.
+        
+        *Investigation summary* (AI-written from verified evidence, every number and id fact-checked):
+        Volume vol-aa28940e87d7347aa has been unattached for 0 days. The owner analytics-data is attributed with 0.95 confidence based on consistent evidence. Projected monthly savings are 159.9000 USD. Approval status is requested, but all callback attempts were refused by analytics-approver and system:n8n-timeout. Dry run was valid and targets include vol-aa28940e87d7347aa. Realized savings are not measured.
+        
+        _ref evt_a15c041531c0fd8e56ae_
+    --- :white_check_mark: *APPROVED* — batch-dev (payments)
+        case `case_payments_batch-dev-idle-ec2` · PENDING → APPROVED · by payments-approver
+        _Alert only: this system investigates and informs; people decide and fix._
+        human decision recorded; the system made NO change, the owner fixes it by hand
+        owner: payments-platform · risk: low · projected: 420.0000 USD/month (projected, not realized)
+        
+        *Investigation summary* (AI-written from verified evidence, every number and id fact-checked):
+        Two EC2 instances, i-214267ad3bf27d3b7 and i-ba875ca70a5675653, show sustained low CPU usage (2.11% and 2.37% over 7 days). Spend anomaly detected: actual $54.19 vs expected $12.24 over 3 days, with an anomaly score of 0.99. Owner payments-platform is attributed with 0.95 confidence based on deployment, naming, and tag evidence. Projected monthly savings are $420.0000. Dry run validated targets without issues. Approval granted by payments-approver; no action taken yet.
+        
+        _ref evt_4446cf5628767289b314_
+    --- :x: *REJECTED* — notebooks (analytics)
+        case `case_analytics_notebooks-unattached-ebs` · PENDING → REJECTED · by analytics-approver
+        _Alert only: this system investigates and informs; people decide and fix._
+        owner: analytics-data · risk: low · projected: 159.9000 USD/month (projected, not realized)
+        note: rejected by approver
+        
+        *Investigation summary* (AI-written from verified evidence, every number and id fact-checked):
+        The volume vol-aa28940e87d7347aa has been unattached for 0 days. It is classified as probable waste with low risk. The owner analytics-data is attributed with 0.95 confidence based on consistent evidence. Projected monthly savings are 159.9000 USD. The approval was rejected by analytics-approver; no execution or verification occurred.
+        
+        _ref evt_08b40de7f53bc99fe8f5_
+  [PASS] alert-only: the APPROVED message says the system made NO change
+  [PASS] alert-only: nothing was ever announced as executed or verified
+  [PASS] Slack got a 'approval needed' message
+  [PASS] Slack got a 'needs review' message
+  [PASS] Slack got a 'REFUSED' message
+  [PASS] Slack got a 'APPROVED' message
+  [PASS] Slack got a 'REJECTED' message
+  [PASS] approval-needed message is structured: Issue / Has to be fixed / Recommendation / Stats / Who acts  (missing [])
+  [PASS] needs-review message is structured: Issue / Has to be fixed / Recommendation / Stats / Who acts  (missing [])
+  [PASS] REFUSED message is structured: Issue / Has to be fixed / Recommendation / Stats / Who acts  (missing [])
+  [PASS] approval message includes the text charts (cost sparkline + CPU bars)
+  [PASS] every message says it is an alert (nothing fixed automatically)  (6 of 6)
+  [PASS] short outcome messages (APPROVED / VERIFIED) stay short: no full briefing
+  [PASS] approval message carries the n8n form link
+  [PASS] no secrets in any Slack message (PIN, HMAC secret, API token)
+  [PASS] every Slack message carries a ref id  (6 refs / 6 messages)
+  [PASS] no Slack message was delivered twice (all refs unique)  (6 refs, 6 unique)
+  [PASS] each outcome was announced exactly once  (6 messages)
+
+   timeline (batch-dev):
+     20:18:18.971 case.created                           -> NEW          system:analysis:run_1ebec8769935
+     20:18:18.972 state.investigated         NEW         -> INVESTIGATED system:analysis:run_1ebec8769935
+     20:18:24.346 state.dry_run              INVESTIGATED-> DRY_RUN      n8n-automation
+     20:18:24.347 state.pending              DRY_RUN     -> PENDING      n8n-automation
+     20:18:35.293 approval.form_published                ->              n8n-automation
+     20:18:37.087 summary.generated                      ->              n8n-automation
+     20:18:41.257 approval.callback_refused              ->              payments-approver
+     20:18:45.438 state.approved             PENDING     -> APPROVED     payments-approver
+     20:18:45.443 approval.recorded_no_action             ->              system
+
+RESULT: ALL CHECKS PASSED

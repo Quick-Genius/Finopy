@@ -1,0 +1,99 @@
+== 1. trigger analysis through n8n (CloudQuery sync -> API analysis -> outbox -> n8n intake -> Custodian dry-run)
+  [PASS] n8n manual webhook accepted  (HTTP 202)
+  [PASS] both approval-ready cases reached PENDING with an n8n form  (20s)
+  [PASS] seeded event -> approval-ready under the 5-minute target  (20s)
+
+== 2. scenario outcomes
+    case_payments_batch-dev-idle-ec2                     PENDING
+    case_payments_checkout-api-spend-anomaly             DISMISSED
+    case_payments_dr-standby-idle-ec2                    REFUSED
+    case_payments_shared-ingest-idle-ec2                 INVESTIGATED
+    case_analytics_notebooks-unattached-ebs              PENDING
+  [PASS] expected Payments spike is DISMISSED as legitimate (not waste)
+  [PASS] normal RDS baseline raised no case
+  [PASS] protected production resource REFUSED before approval
+  [PASS] ambiguous-owner case held as needs_review (no dry-run, no approval)
+    refusal reasons: ['no executable targets remain after guards (1 protected excluded)'] | excluded: [{'reason': 'protected: tag Protected or Environment=production', 'resource_id': 'i-701b448f3184e82aa'}]
+  [PASS] ambiguous case: owner is None, never invented  (conflicting owners: ['payments-platform', 'payments-risk'])
+
+== 3. exact dry-run evidence (Payments safe-action candidate)
+    custodian 0.9.53 dry-run exit 0  targets ['i-20298440fc1de6e72', 'i-a2db652cc4e553fe2']
+    policy sha256     8841eb51a48dbbad60010192b020641c5e1b9a6d470e6dec6d29b7f63e946c59
+    target-set sha256 f675f189eea15e31c9de6bb0d3ae9745f4bcf1586e3ff97304189872b7570826
+    projected saving  420.0000 USD/month (projected; realized = not measured)
+  [PASS] exactly two sorted targets, hashes bound to the approval
+  [PASS] policy is a deterministic template (mark-for-op, no delete/terminate)
+  [PASS] LocalStack BEFORE: 6 instances seen, none carries finops_mark  (6 instances)
+
+== 4. cross-tenant denial (Payments identity vs the Analytics case)
+  [PASS] Payments cannot read the Analytics case by guessing its id
+  [PASS] Payments cannot read its audit trail
+  [PASS] Payments cannot dry-run / act on it
+  [PASS] validly-signed n8n callback naming a Payments approver for an Analytics approval is refused  (HTTP 403 {'error': "actor is not a member of the case's tenant"})
+  [PASS] human bearer token cannot call the callback endpoint
+  [PASS] bad signature rejected
+  [PASS] stale timestamp rejected (replay window)
+  [PASS] Analytics case still PENDING after all forged attempts
+
+== 4b. n8n-side failures must answer 5xx (outbox retries) and must NOT be marked as handled
+  [PASS] intake: API fetch fails -> HTTP 500, not a silent 200  (HTTP 500)
+  [PASS] intake: the same event is retried (not swallowed as a duplicate)  (HTTP 500)
+  [PASS] approval: packet fetch fails -> HTTP 500 and the event stays retryable  (HTTP 500/500)
+  [PASS] signed event with a path-traversal case_id is rejected before any API call  (HTTP 401 {'error': 'malformed identifier'})
+  [PASS] API refuses malformed path /cases/bad.id  (HTTP 422)
+  [PASS] API refuses malformed path /cases/case_x%20y  (HTTP 422)
+  [PASS] API refuses malformed path /approvals/apr_XYZ  (HTTP 422)
+  [PASS] API refuses malformed path /approvals/..%2Fcases  (HTTP 404)
+  [PASS] intake: first delivery of a digest-only event is handled (200, no action)  (HTTP 200 {'ok': True, 'handled': True})
+  [PASS] intake: sequential re-delivery of the same event_id is a duplicate no-op  (HTTP 200 {'duplicate': True})
+
+== 5. human approval through the n8n form (first with a WRONG pin)
+  [PASS] wrong PIN does not approve  (form HTTP 200)
+  [PASS] refusal recorded in the tenant audit trail  (['actor identity proof failed'])
+   now the real approver submits the same form
+  [PASS] form accepted  (HTTP 200)
+  [PASS] case reached VERIFIED  (VERIFIED)
+    execution exe_aa1f0ff8cdbd status=succeeded exit=0 matched=['i-20298440fc1de6e72', 'i-a2db652cc4e553fe2']
+    approver=payments-approver role=approver decided=2026-10-08T19:36:28.365251+00:00
+    verify i-20298440fc1de6e72: finops_mark = 'Resource does not meet policy: stop@2026/10/10' (changed=True)
+    verify i-a2db652cc4e553fe2: finops_mark = 'Resource does not meet policy: stop@2026/10/10' (changed=True)
+  [PASS] runner matched exactly the approved targets, exit 0
+
+== 6. live resource state in LocalStack AFTER the action (independent read)
+    i-a2db652cc4e553fe2 payments-batch-dev-1     running  finops_mark=Resource does not meet policy: stop@2026/10/10
+    i-20298440fc1de6e72 payments-batch-dev-2     running  finops_mark=Resource does not meet policy: stop@2026/10/10
+    i-701b448f3184e82aa payments-dr-standby      running  finops_mark=None
+    i-e34c72da9e5449ed9 payments-shared-ingest   running  finops_mark=None
+    i-757872af8f00e33f4 payments-api-1           running  finops_mark=None
+    i-6d5beac42ac73c03f analytics-etl-1          running  finops_mark=None
+  [PASS] exactly the two approved instances are marked, and still running (non-destructive)
+  [PASS] protected DR instance untouched
+
+== 7. duplicate callback / replay does nothing
+  [PASS] same idempotency key returns the earlier result, flagged replayed  (HTTP 200 {'state': 'APPROVED', 'outcome': 'approved', 'approval_id': 'apr_6ab0cc1b5ef9', 'execution_id': 'exe_aa1f0ff8cdbd', 'replayed': True})
+  [PASS] fresh key on an already-decided approval is refused (no second execution)  (HTTP 409 approval is approved and case is VERIFIED; nothing to decide)
+  [PASS] re-clicking the n8n form is a no-op  (form HTTP 200)
+  [PASS] LocalStack unchanged by the duplicates
+  [PASS] database holds exactly ONE execution for the case  (1)
+
+== 8. rejection closes the gate (Analytics)
+  [PASS] Analytics case REJECTED, nothing executed
+
+== 9. tenant-scoped audit export
+  [PASS] Payments export contains only Payments events  (24 events)
+
+== 10. Slack: skipped (no slack-mock running; set SLACK_WEBHOOK_URL to test)
+
+   timeline (batch-dev):
+     19:36:06.291 case.created                           -> NEW          system:analysis:run_098012fe1cf0
+     19:36:06.293 state.investigated         NEW         -> INVESTIGATED system:analysis:run_098012fe1cf0
+     19:36:09.326 state.dry_run              INVESTIGATED-> DRY_RUN      n8n-automation
+     19:36:09.330 state.pending              DRY_RUN     -> PENDING      n8n-automation
+     19:36:19.252 approval.form_published                ->              n8n-automation
+     19:36:21.184 summary.generated                      ->              n8n-automation
+     19:36:24.263 approval.callback_refused              ->              payments-approver
+     19:36:28.373 state.approved             PENDING     -> APPROVED     payments-approver
+     19:36:28.376 execution.queued                       ->              system
+     19:36:31.349 state.executed             APPROVED    -> EXECUTED     system:executor
+     19:36:31.419 state.verified             EXECUTED    -> VERIFIED     system:verifier
+     19:36:31.473 summary.generated                      ->              n8n-automation

@@ -16,7 +16,7 @@ COPY --from=pgdest /cq-destination-postgresql /usr/local/bin/cq-destination-post
 WORKDIR /srv
 COPY cq/server.py .
 COPY cq/spec.yml /spec/spec.yml
-RUN useradd -m -u 10003 cq
+RUN useradd -m -u 10003 cq && mkdir -p /home/cq/.cq && chown -R cq:cq /home/cq/.cq
 USER cq
 EXPOSE 8080
 CMD ["uvicorn", "--app-dir", "/srv", "server:app", "--host", "0.0.0.0", "--port", "8080"]

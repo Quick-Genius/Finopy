@@ -3,14 +3,15 @@ import json
 import logging
 import threading
 from contextlib import asynccontextmanager
+from typing import Annotated
 from datetime import date
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Path, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict
 
-from . import analysis, approval, config, execution, inventory, outbox, policy, runner_client
+from . import analysis, approval, briefing, config, execution, inventory, outbox, policy, runner_client, summarize
 from .auth import Principal, current_principal, require_roles, tenant_for_case
 from .db import open_pool, tx
 from .security import utcnow
@@ -46,11 +47,20 @@ def _sweeper():
         time.sleep(10)
 
 
+# Identifiers are interpolated into SQL parameters (safe) AND into URLs by n8n, so refuse anything but the generated formats.
+CaseId = Annotated[str, Path(pattern=r"^case_[A-Za-z0-9_-]{1,120}$")]
+ApprovalId = Annotated[str, Path(pattern=r"^apr_[a-f0-9]{8,32}$")]
+
+WORKERS: dict[str, threading.Thread] = {}
+
+
 @asynccontextmanager
 async def lifespan(_):
     open_pool()
-    for fn in (outbox.loop, execution.loop, _sweeper):
-        threading.Thread(target=fn, daemon=True).start()
+    for name, fn in (("outbox_dispatcher", outbox.loop), ("execution_worker", execution.loop), ("expiry_sweeper", _sweeper)):
+        t = threading.Thread(target=fn, daemon=True, name=name)
+        t.start()
+        WORKERS[name] = t
     yield
 
 
@@ -82,7 +92,16 @@ def health():
         out["runner"] = runner_client.health().get("status", "unknown")
     except Exception as e:
         out["runner"] = f"error: {type(e).__name__}"
-    code = 200 if out["database"] == "ok" else 503
+    out["workers"] = {n: ("alive" if t.is_alive() else "DEAD") for n, t in WORKERS.items()}
+    try:
+        with tx(system=True) as c:
+            out["outbox_pending"] = c.execute("select count(*) as n from outbox where delivered_at is null").fetchone()["n"]
+            out["executions_queued"] = c.execute("select count(*) as n from executions where status in ('queued','running')").fetchone()["n"]
+    except Exception:
+        pass
+    out["action_mode"] = config.ACTION_MODE
+    out["llm"] = config.LLM_PROVIDER if (config.LLM_PROVIDER and config.LLM_API_KEY) else "off (template summaries)"
+    code = 200 if out["database"] == "ok" and all(v == "alive" for v in out["workers"].values()) else 503
     return JSONResponse(out, status_code=code)
 
 
@@ -120,7 +139,7 @@ def list_cases(p: Principal = Depends(HUMAN)):
 
 
 @app.get("/cases/{case_id}")
-def get_case(case_id: str, p: Principal = Depends(ANY_ROLE)):
+def get_case(case_id: CaseId, p: Principal = Depends(ANY_ROLE)):
     t = tenant_for_case(p, case_id)
     with tx(t) as c:
         case = _case_or_404(c, t, case_id)
@@ -140,7 +159,7 @@ def get_case(case_id: str, p: Principal = Depends(ANY_ROLE)):
 
 
 @app.get("/cases/{case_id}/audit")
-def case_audit(case_id: str, p: Principal = Depends(ANY_ROLE)):
+def case_audit(case_id: CaseId, p: Principal = Depends(ANY_ROLE)):
     t = tenant_for_case(p, case_id)
     with tx(t) as c:
         _case_or_404(c, t, case_id)
@@ -240,7 +259,7 @@ def internal_analyze(body: InternalAnalyzeIn, p: Principal = Depends(require_rol
 
 # ------------------------------------------------------------------ dry-run, approval
 @app.post("/cases/{case_id}/dry-run")
-def dry_run(case_id: str, p: Principal = Depends(require_roles("analyst", "reviewer", "automation"))):
+def dry_run(case_id: CaseId, p: Principal = Depends(require_roles("analyst", "reviewer", "automation"))):
     t = tenant_for_case(p, case_id)
     try:
         return policy.dry_run(t, case_id, p.principal_id)
@@ -251,7 +270,7 @@ def dry_run(case_id: str, p: Principal = Depends(require_roles("analyst", "revie
 
 
 @app.get("/approvals/{approval_id}")
-def approval_packet(approval_id: str, p: Principal = Depends(ANY_ROLE)):
+def approval_packet(approval_id: ApprovalId, p: Principal = Depends(ANY_ROLE)):
     """Everything an approver must see. Read from our own tables; the n8n form only displays it."""
     with tx(system=True) as c:
         row = c.execute("select tenant_id, case_id from approvals where approval_id=%s", (approval_id,)).fetchone()
@@ -273,7 +292,7 @@ def approval_packet(approval_id: str, p: Principal = Depends(ANY_ROLE)):
             "targets": [{"id": i, "name": names.get(i)} for i in pol["target_ids"]], "target_count": len(pol["target_ids"]),
             "excluded": pol["excluded"], "projected_savings": pol["guards"]["savings"], "policy_sha256": a["policy_sha256"],
             "target_set_sha256": a["target_set_sha256"], "expires_at": a["expires_at"], "required_role": a["required_role"],
-            "policy_yaml": pol["policy_yaml"]}
+            "policy_yaml": pol["policy_yaml"], "action_mode": config.ACTION_MODE}
 
 
 class FormUrlIn(BaseModel):
@@ -282,7 +301,7 @@ class FormUrlIn(BaseModel):
 
 
 @app.post("/approvals/{approval_id}/form-url")
-def set_form_url(approval_id: str, body: FormUrlIn, p: Principal = Depends(require_roles("automation"))):
+def set_form_url(approval_id: ApprovalId, body: FormUrlIn, p: Principal = Depends(require_roles("automation"))):
     if not body.form_url.startswith(config.N8N_FORM_BASE + "/"):
         raise HTTPException(422, "form_url must point at the configured n8n host")
     with tx(system=True) as c:
@@ -300,6 +319,44 @@ async def approve(request: Request, p: Principal = Depends(require_roles("automa
     """Signed approval callback from n8n (v2 contract). Human bearer tokens are rejected by the role dependency."""
     raw = await request.body()
     code, body = approval.handle(raw, request.headers.get("x-sentinel-timestamp", ""), request.headers.get("x-sentinel-signature", ""))
-    if code == 200 and body.get("outcome") == "approved":
+    if code == 200 and body.get("outcome") == "approved" and body.get("execution_id"):
         execution.WAKE.set()
     return JSONResponse(body, status_code=code)
+
+
+# ------------------------------------------------------------------ n8n delivery bookkeeping (idempotent, concurrency-safe)
+EVENT_ID = Path(pattern=r"^evt_[A-Za-z0-9_]{1,64}$")
+
+
+class SeenIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    workflow: str
+
+
+@app.get("/internal/events/{event_id}")
+def event_seen(event_id: str = EVENT_ID, p: Principal = Depends(require_roles("automation"))):
+    with tx(system=True) as c:
+        return {"seen": c.execute("select 1 from n8n_seen_events where event_id=%s", (event_id,)).fetchone() is not None}
+
+
+@app.put("/internal/events/{event_id}")
+def mark_event_seen(body: SeenIn, event_id: str = EVENT_ID, p: Principal = Depends(require_roles("automation"))):
+    """Called by n8n only AFTER the event was handled successfully, so a failed delivery is retried, never swallowed."""
+    with tx(system=True) as c:
+        c.execute("insert into n8n_seen_events (event_id, workflow) values (%s,%s) on conflict (event_id) do nothing", (event_id, body.workflow[:64]))
+    return {"seen": True}
+
+
+@app.get("/cases/{case_id}/summary")
+def case_summary(case_id: CaseId, p: Principal = Depends(ANY_ROLE)):
+    """Readable investigation note built from verified evidence. LLM-phrased only if configured AND its output passes the fact check."""
+    t = tenant_for_case(p, case_id)
+    try:
+        packet = summarize.load_packet(t, case_id)
+    except LookupError:
+        raise HTTPException(404, "case not found")
+    out = summarize.summarize(packet)
+    with tx(t) as c:
+        audit(c, t, case_id, "summary.generated", p.principal_id, version=None,
+              detail={"source": out["source"], "model": out.get("model"), "reason": out.get("reason"), "summary": out["summary"][:1200]})
+    return {"case_id": case_id, **out, "briefing": briefing.build(packet, briefing.load_stats(t, packet))["text"]}

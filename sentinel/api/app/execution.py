@@ -48,6 +48,9 @@ def _finish(ex, *, status, case_state, runner=None, reasons=None, verification=N
 
 def run_one(ex: dict) -> None:
     t, cid = ex["tenant_id"], ex["case_id"]
+    if config.ACTION_MODE != "tag_after_approval":
+        _finish(ex, status="refused", case_state="EXECUTION_FAILED", reasons=["alert-only mode: the system never changes resources"])
+        return
     with tx(t) as c:
         a = c.execute("select * from approvals where approval_id=%s", (ex["approval_id"],)).fetchone()
         case = c.execute("select * from cases where case_id=%s", (cid,)).fetchone()

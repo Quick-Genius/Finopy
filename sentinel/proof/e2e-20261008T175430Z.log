@@ -1,0 +1,4 @@
+== 1. trigger analysis through n8n (CloudQuery sync -> API analysis -> outbox -> n8n intake -> Custodian dry-run)
+  [PASS] n8n manual webhook accepted  (HTTP 202)
+  [FAIL] both approval-ready cases reached PENDING with an n8n form  (242s)
+  [PASS] seeded event -> approval-ready under the 5-minute target  (242s)

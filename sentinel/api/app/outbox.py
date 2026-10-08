@@ -9,7 +9,8 @@ from .db import tx
 from .security import canonical, sign
 
 log = logging.getLogger("sentinel.outbox")
-ROUTES = {"case.created": "sentinel-case", "case.updated": "sentinel-case", "approval.requested": "sentinel-approval"}
+ROUTES = {"case.created": "sentinel-case", "case.updated": "sentinel-case", "approval.requested": "sentinel-approval",
+          "case.state_changed": "sentinel-notify"}
 
 
 def deliver_due(limit: int = 10) -> int:

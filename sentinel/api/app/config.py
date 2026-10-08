@@ -30,3 +30,15 @@ IDLE_CPU_PCT = 5.0
 MIN_DAILY_EXCESS_USD = 5.0
 # LocalStack cannot back-date launch/create times, so the demo sets this to 0; production default is the idle window.
 RESOURCE_MIN_AGE_DAYS = int(_e("RESOURCE_MIN_AGE_DAYS", "7"))
+
+# Optional LLM used ONLY to phrase verified evidence for Slack. Empty provider = deterministic template summaries.
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "").strip().lower()      # "" | alibaba | cohere | anthropic
+LLM_MODEL = os.environ.get("LLM_MODEL", "").strip()
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "").strip()
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "").strip().rstrip("/")  # tests point this at a local stand-in
+LLM_TIMEOUT_SECONDS = 20
+
+# alert_only (default): the system investigates and alerts; people decide AND fix. An approval is only recorded.
+# tag_after_approval: after a named human approves, the isolated Custodian runner may apply ONE reversible tag.
+ACTION_MODE = os.environ.get("ACTION_MODE", "alert_only").strip().lower()
+assert ACTION_MODE in ("alert_only", "tag_after_approval"), "ACTION_MODE must be alert_only or tag_after_approval"

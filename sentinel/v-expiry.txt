@@ -1,0 +1,10 @@
+== expiry: no decision => approval EXPIRED, never auto-approved (requires APPROVAL_TTL_SECONDS small)
+  [PASS] PENDING with form
+   approval TTL = 25s; waiting for expiry without deciding
+  [PASS] case EXPIRED  (EXPIRED)
+  [PASS] approval expired and no execution exists
+  [PASS] a late click after expiry cannot approve  (form HTTP 200)
+  [PASS] nothing marked in LocalStack
+   escalation trail: ['approval.form_published', 'approval.escalated', 'approval.callback_refused']
+
+RESULT: ALL CHECKS PASSED

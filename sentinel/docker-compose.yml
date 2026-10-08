@@ -11,6 +11,7 @@ x-api-env: &api-env          # the running API gets ONLY the RLS-bound app role,
   DATABASE_URL: postgresql://sentinel_app:${APP_DB_PASSWORD}@postgres:5432/sentinel
   N8N_HMAC_SECRET: ${N8N_HMAC_SECRET}
   RUNNER_HMAC_SECRET: ${RUNNER_HMAC_SECRET}
+  N8N_FORM_BASE: http://localhost:${N8N_HOST_PORT:-5678}
 
 services:
   postgres:
@@ -25,7 +26,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
-    ports: ["127.0.0.1:5433:5432"]
+    ports: ["127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinel"]
       interval: 3s
@@ -37,7 +38,7 @@ services:
     environment:
       SERVICES: ec2,sts,cloudwatch,iam
       DEBUG: "0"
-    ports: ["127.0.0.1:4566:4566"]
+    ports: ["127.0.0.1:${LOCALSTACK_HOST_PORT:-4566}:4566"]
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:4566/_localstack/health"]
       interval: 5s
@@ -71,6 +72,7 @@ services:
     environment:
       <<: *aws-dummy
       RUNNER_HMAC_SECRET: ${RUNNER_HMAC_SECRET}
+      ACTION_MODE: ${ACTION_MODE:-alert_only}
     volumes: [runner_state:/data]
     depends_on:
       localstack: {condition: service_healthy}
@@ -105,13 +107,18 @@ services:
     environment:
       <<: *api-env
       N8N_WEBHOOK_BASE: http://n8n:5678/webhook
-      N8N_FORM_BASE: http://localhost:5678
+      N8N_FORM_BASE: http://localhost:${N8N_HOST_PORT:-5678}
       RUNNER_URL: http://runner:8080
       DEMO_MODE: "true"
       RESOURCE_MIN_AGE_DAYS: "0"        # LocalStack cannot back-date launch times
       APPROVAL_TTL_SECONDS: ${APPROVAL_TTL_SECONDS:-1800}
       SNAPSHOT_MAX_AGE_SECONDS: ${SNAPSHOT_MAX_AGE_SECONDS:-3600}
-    ports: ["127.0.0.1:8000:8000"]
+      ACTION_MODE: ${ACTION_MODE:-alert_only}   # alert_only = nothing is ever changed; tag_after_approval = one reversible tag after a human approves
+      LLM_PROVIDER: ${LLM_PROVIDER:-}      # optional: cohere | anthropic. Empty = template summaries; nothing leaves the machine
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+    ports: ["127.0.0.1:${API_HOST_PORT:-8000}:8000"]
     depends_on:
       migrate: {condition: service_completed_successfully}
       runner: {condition: service_healthy}
@@ -134,7 +141,7 @@ services:
       N8N_HOST: localhost
       N8N_PORT: "5678"
       N8N_PROTOCOL: http
-      WEBHOOK_URL: http://localhost:5678/
+      WEBHOOK_URL: http://localhost:${N8N_HOST_PORT:-5678}/
       GENERIC_TIMEZONE: UTC
       TZ: UTC
       NODE_FUNCTION_ALLOW_BUILTIN: crypto
@@ -148,11 +155,12 @@ services:
       SENTINEL_CQ_URL: http://cq-runner:8080
       SENTINEL_CQ_TOKEN: ${CQ_RUNNER_TOKEN}
       SENTINEL_RUN_NOW_SECRET: ${RUN_NOW_SECRET}
+      SENTINEL_SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}   # optional; empty = Slack notifications are skipped
     volumes:
       - n8n_data:/home/node/.n8n
       - ./n8n/workflows:/workflows:ro
       - ./n8n/entrypoint.sh:/entrypoint.sh:ro
-    ports: ["127.0.0.1:5678:5678"]
+    ports: ["127.0.0.1:${N8N_HOST_PORT:-5678}:5678"]
     depends_on:
       postgres: {condition: service_healthy}
     healthcheck:
@@ -163,7 +171,7 @@ services:
 
   dashboard:
     build: {context: dashboard}
-    ports: ["127.0.0.1:3000:80"]
+    ports: ["127.0.0.1:${DASHBOARD_HOST_PORT:-3000}:80"]
     depends_on:
       api: {condition: service_healthy}
 

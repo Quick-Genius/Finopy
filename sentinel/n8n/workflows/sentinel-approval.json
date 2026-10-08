@@ -31,7 +31,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "\n// Verify HMAC over the RAW body + timestamp window, then dedupe by event_id. Never throws: returns a verdict.\nconst crypto = require('crypto');\nconst it = $input.first();\nconst h = it.json.headers || {};\nconst out = (o) => [{ json: o }];\nconst b64 = it.binary && it.binary.data ? it.binary.data.data : null;\nif (!b64) return out({ valid: false, reason: 'no raw body' });\nconst raw = Buffer.from(b64, 'base64');\nconst ts = h['x-sentinel-timestamp'];\nconst sig = h['x-sentinel-signature'] || '';\nif (!ts || !(Math.abs(Date.now() / 1000 - Number(ts)) <= 300)) return out({ valid: false, reason: 'stale or missing timestamp' });\nconst want = crypto.createHmac('sha256', $env.SENTINEL_HMAC_SECRET).update(ts + '.').update(raw).digest('hex');\nconst a = Buffer.from(want), b = Buffer.from(sig);\nif (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return out({ valid: false, reason: 'bad signature' });\nconst event = JSON.parse(raw.toString('utf8'));\nconst seen = $getWorkflowStaticData('global').seen || {};\nreturn out({ valid: true, duplicate: !!seen[event.event_id], event });\n"
+        "jsCode": "\n// Verify HMAC over the RAW body + timestamp window. Never throws: returns a verdict.\nconst crypto = require('crypto');\nconst it = $input.first();\nconst h = it.json.headers || {};\nconst out = (o) => [{ json: o }];\nlet raw = null;\nif (it.binary && it.binary.data) raw = await this.helpers.getBinaryDataBuffer(0, 'data');   // works in memory and filesystem binary modes\nif (!raw) return out({ valid: false, reason: 'no raw body' });\nconst ts = h['x-sentinel-timestamp'];\nconst sig = h['x-sentinel-signature'] || '';\nif (!ts || !(Math.abs(Date.now() / 1000 - Number(ts)) <= 300)) return out({ valid: false, reason: 'stale or missing timestamp' });\nconst want = crypto.createHmac('sha256', $env.SENTINEL_HMAC_SECRET).update(ts + '.').update(raw).digest('hex');\nconst a = Buffer.from(want), b = Buffer.from(sig);\nif (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return out({ valid: false, reason: 'bad signature' });\nconst event = JSON.parse(raw.toString('utf8'));\n// Identifiers become URL path segments: accept only the exact formats the API generates (defense in depth; the event is already HMAC-signed).\nconst malformed = (k, re) => event[k] !== undefined && !re.test(String(event[k]));\nif (malformed('event_id', /^evt_[A-Za-z0-9_]{1,64}$/) || malformed('approval_id', /^apr_[a-f0-9]{8,32}$/) || malformed('case_id', /^case_[A-Za-z0-9_-]{1,120}$/))\n  return out({ valid: false, reason: 'malformed identifier' });\nreturn out({ valid: true, duplicate: false, event });   // dedupe is checked against the API, not n8n static data\n"
       }
     },
     {
@@ -138,24 +138,228 @@
     },
     {
       "id": "sentinelApproval001-6",
-      "name": "Mark seen",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
+      "name": "Respond 500 (outbox will retry)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1500,
+        300
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: \"temporary failure, retry\" }) }}",
+        "options": {
+          "responseCode": 500
+        }
+      }
+    },
+    {
+      "id": "sentinelApproval001-7",
+      "name": "Get approval packet",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "position": [
         800,
         40
       ],
       "parameters": {
-        "jsCode": "\n// Record the event as handled only AFTER success, so a failed delivery is retried by the outbox, not swallowed.\nconst sd = $getWorkflowStaticData('global');\nsd.seen = sd.seen || {};\nconst ev = $('Verify signature').first().json.event;\nsd.seen[ev.event_id] = Date.now();\nconst ks = Object.keys(sd.seen);\nif (ks.length > 500) ks.sort((x, y) => sd.seen[x] - sd.seen[y]).slice(0, ks.length - 500).forEach((k) => delete sd.seen[k]);\nreturn [{ json: { handled: true, event_id: ev.event_id, ...( $input.first() ? { upstream: $input.first().json.statusCode ?? null } : {}) } }];\n"
-      }
+        "method": "GET",
+        "url": "={{ $env.SENTINEL_API }}/approvals/{{ encodeURIComponent($node['Verify signature'].json.event.approval_id) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueErrorOutput"
     },
     {
-      "id": "sentinelApproval001-7",
+      "id": "sentinelApproval001-8",
+      "name": "Check packet",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        40
+      ],
+      "parameters": {
+        "jsCode": "\nconst r = $input.first().json;\nif (r.statusCode !== 200) throw new Error('API answered HTTP ' + r.statusCode);\nreturn [{ json: JSON.parse(JSON.stringify(r.body)) }];     // plain copy: returning n8n proxy objects overflows the stack\n"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelApproval001-9",
+      "name": "Publish form URL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        40
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SENTINEL_API }}/approvals/{{ encodeURIComponent($json.approval_id) }}/form-url",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ form_url: $execution.resumeFormUrl }) }}"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelApproval001-10",
+      "name": "Check published",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        40
+      ],
+      "parameters": {
+        "jsCode": "\nconst r = $input.first().json;\nif (r.statusCode !== 200) throw new Error('form-url publish answered HTTP ' + r.statusCode);\nreturn [{ json: { published: true } }];\n"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelApproval001-11",
+      "name": "Seen before?",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        500,
+        -140
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SENTINEL_API }}/internal/events/{{ encodeURIComponent($json.event.event_id) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelApproval001-12",
+      "name": "Check seen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        650,
+        -140
+      ],
+      "parameters": {
+        "jsCode": "\nconst r = $input.first().json;\nif (r.statusCode !== 200) throw new Error('dedupe lookup answered HTTP ' + r.statusCode);\nreturn [{ json: { duplicate: !!(r.body && r.body.seen) } }];\n"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelApproval001-13",
+      "name": "Mark seen (API)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1600,
+        40
+      ],
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $env.SENTINEL_API }}/internal/events/{{ encodeURIComponent($node['Verify signature'].json.event.event_id) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ workflow: 'approval' }) }}"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelApproval001-14",
+      "name": "Mark handled",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1750,
+        40
+      ],
+      "parameters": {
+        "jsCode": "\nconst r = $input.first().json;\nif (r.statusCode !== 200) throw new Error('marking the event seen answered HTTP ' + r.statusCode);\nreturn [{ json: { handled: true } }];\n"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sentinelApproval001-15",
       "name": "Respond accepted",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        1000,
+        1800,
         40
       ],
       "parameters": {
@@ -167,101 +371,44 @@
       }
     },
     {
-      "id": "sentinelApproval001-8",
-      "name": "Get approval packet",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        1200,
-        40
-      ],
-      "parameters": {
-        "method": "GET",
-        "url": "={{ $env.SENTINEL_API }}/approvals/{{ $node['Verify signature'].json.event.approval_id }}",
-        "sendHeaders": true,
-        "specifyHeaders": "keypair",
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
-            }
-          ]
-        },
-        "options": {
-          "timeout": 60000,
-          "response": {
-            "response": {
-              "fullResponse": false,
-              "neverError": true
-            }
-          }
-        }
-      }
-    },
-    {
-      "id": "sentinelApproval001-9",
-      "name": "Publish form URL",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        1400,
-        40
-      ],
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.SENTINEL_API }}/approvals/{{ $json.approval_id }}/form-url",
-        "sendHeaders": true,
-        "specifyHeaders": "keypair",
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
-            }
-          ]
-        },
-        "options": {
-          "timeout": 60000,
-          "response": {
-            "response": {
-              "fullResponse": false,
-              "neverError": true
-            }
-          }
-        },
-        "sendBody": true,
-        "contentType": "json",
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ form_url: $execution.resumeFormUrl }) }}"
-      }
-    },
-    {
-      "id": "sentinelApproval001-10",
+      "id": "sentinelApproval001-16",
       "name": "Build form",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1600,
+        2000,
         40
       ],
       "parameters": {
-        "jsCode": "\n// Everything shown comes from the API's own record of the approval; values are HTML-escaped.\nconst p = $('Get approval packet').first().json;\nconst e = (s) => String(s ?? '').replace(/[&<>\"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[c]));\nconst err = $json.lastError ? `<p style=\"color:#b3261e\"><b>Previous attempt refused:</b> ${e($json.lastError)}</p>` : '';\nconst rows = [\n  ['Tenant', p.tenant_id], ['Accountable owner', `${p.owner} (confidence ${p.attribution_confidence})`], ['Action', `${p.action} via template ${p.template}`],\n  ['Exact targets (' + p.target_count + ')', p.targets.map((t) => `${t.id}${t.name ? ' (' + t.name + ')' : ''}`).join(', ')],\n  ['Excluded', (p.excluded || []).map((x) => `${x.resource_id}: ${x.reason}`).join('; ') || 'none'],\n  ['Projected saving', `${p.projected_savings.monthly} ${p.projected_savings.currency}/month (projected, not realized)`],\n  ['Assumptions', (p.projected_savings.assumptions || []).join('; ')], ['Risk', p.risk], ['Rollback', p.rollback], ['Why', (p.why || []).join('; ')],\n  ['Policy sha256', p.policy_sha256], ['Target-set sha256', p.target_set_sha256], ['Case / version', `${p.case_id} / v${p.case_version}`], ['Expires (UTC)', p.expires_at],\n];\nconst html = err + '<table style=\"text-align:left;font-size:13px\">' + rows.map(([k, v]) => `<tr><th style=\"padding-right:12px;vertical-align:top\">${e(k)}</th><td style=\"word-break:break-all\">${e(v)}</td></tr>`).join('') + '</table>' +\n  '<p>Your decision is checked by the Sentinel API against its own copy of these values. The form cannot change targets, policy or tenant.</p>';\nreturn [{ json: { formHtml: html } }];\n"
+        "jsCode": "\n// Everything shown comes from the API's own record of the approval; values are HTML-escaped.\nconst p = $('Check packet').first().json;\nconst e = (s) => String(s ?? '').replace(/[&<>\"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[c]));\nconst err = $json.lastError ? `<p style=\"color:#b3261e\"><b>Previous attempt refused:</b> ${e($json.lastError)}</p>` : '';\nconst rows = [\n  ['Tenant', p.tenant_id], ['Accountable owner', `${p.owner} (confidence ${p.attribution_confidence})`], ['Proposed fix', p.action_mode === 'tag_after_approval' ? `${p.action} via template ${p.template} (applied by the isolated runner after you approve)` : `${p.action} via template ${p.template} (NOT applied by the system: approving only records your decision, a person does the fix)`],\n  ['Exact targets (' + p.target_count + ')', p.targets.map((t) => `${t.id}${t.name ? ' (' + t.name + ')' : ''}`).join(', ')],\n  ['Excluded', (p.excluded || []).map((x) => `${x.resource_id}: ${x.reason}`).join('; ') || 'none'],\n  ['Projected saving', `${p.projected_savings.monthly} ${p.projected_savings.currency}/month (projected, not realized)`],\n  ['Assumptions', (p.projected_savings.assumptions || []).join('; ')], ['Risk', p.risk], ['Rollback', p.rollback], ['Why', (p.why || []).join('; ')],\n  ['Policy sha256', p.policy_sha256], ['Target-set sha256', p.target_set_sha256], ['Case / version', `${p.case_id} / v${p.case_version}`], ['Expires (UTC)', p.expires_at],\n];\nconst html = err + '<table style=\"text-align:left;font-size:13px\">' + rows.map(([k, v]) => `<tr><th style=\"padding-right:12px;vertical-align:top\">${e(k)}</th><td style=\"word-break:break-all\">${e(v)}</td></tr>`).join('') + '</table>' +\n  '<p>Your decision is checked by the Sentinel API against its own copy of these values. The form cannot change targets, policy or tenant.</p>';\nreturn [{ json: { formHtml: html, retry: !!$json.lastError } }];\n"
       }
     },
     {
-      "id": "sentinelApproval001-11",
+      "id": "sentinelApproval001-17",
+      "name": "Build Slack approval message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2100,
+        40
+      ],
+      "parameters": {
+        "jsCode": "const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst sm = (() => { try { const b = $('Summarize case').first().json.body; return b && b.summary ? b : null; } catch (e) { return null; } })();\n\n// Sent once per approval (not again after a wrong-PIN retry). The link is the n8n form; the API still checks ID + PIN.\nif ($json.retry) return [{ json: { slack_text: '' } }];\nconst p = $('Check packet').first().json;\nconst ids = p.targets.map((t) => `${esc(t.id)}${t.name ? ' (' + esc(t.name) + ')' : ''}`).join(', ');\nconst lines = [`:bell: *Approval needed* \\u2014 ${esc(p.owner)} \\u00b7 tenant *${esc(p.tenant_id)}*`,\n  `case \\`${esc(p.case_id)}\\` v${esc(p.case_version)} \\u00b7 proposed fix: ${esc(p.action)} \\u00b7 risk: ${esc(p.risk)}`,\n  p.action_mode === 'tag_after_approval' ? '_Alert only: nothing has been changed yet. A human decides; the only action the system can ever take is a reversible tag._' : '_Alert only: nothing has been changed, and the system will not change anything. A human decides and fixes it by hand._', ''];\nif (sm && sm.briefing) lines.push(sm.briefing, '');\nelse lines.push(`projected saving: ${esc(p.projected_savings.monthly)} ${esc(p.projected_savings.currency)}/month (projected, not realized)`, `rollback: ${esc(p.rollback)}`, '');\nlines.push(`*Exact targets (${p.target_count}):* ${ids}`);\nif (p.excluded && p.excluded.length) lines.push('*Excluded:* ' + p.excluded.map((x) => `${esc(x.resource_id)} (${esc(x.reason)})`).join('; '));\nlines.push(`*Expires:* ${esc(p.expires_at)}`,\n  `<${$execution.resumeFormUrl}|Open the approval form> \\u2014 needs approver ID + PIN. Silence expires it; nothing is ever auto-approved.`);\n\nif (sm) lines.push('', '*Investigation summary* (' + (sm.source === 'llm' ? 'AI-written from verified evidence, every number and id fact-checked' : 'built from verified evidence') + '):\\n' + esc(sm.summary));\ntry { lines.push('', '_ref ' + $('Verify signature').first().json.event.event_id + '_'); } catch (e) { /* no reference available */ }\nreturn [{ json: { slack_text: lines.join('\\n') } }];\n"
+      }
+    },
+    {
+      "id": "sentinelApproval001-18",
       "name": "Wait for approver",
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        1800,
+        2200,
         40
       ],
       "parameters": {
         "resume": "form",
         "formTitle": "Sentinel approval",
-        "formDescription": "={{ $json.formHtml }}",
+        "formDescription": "={{ $node['Build form'].json.formHtml }}",
         "formFields": {
           "values": [
             {
@@ -298,31 +445,31 @@
         },
         "limitWaitTime": true,
         "limitType": "atSpecifiedTime",
-        "maxDateAndTime": "={{ new Date(new Date($node['Get approval packet'].json.expires_at).getTime() + 3000).toISOString() }}",
+        "maxDateAndTime": "={{ new Date(new Date($node['Check packet'].json.expires_at).getTime() + 3000).toISOString() }}",
         "options": {}
       },
       "webhookId": "sentinel-approval-form"
     },
     {
-      "id": "sentinelApproval001-12",
+      "id": "sentinelApproval001-19",
       "name": "Build signed callback",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2000,
+        2400,
         40
       ],
       "parameters": {
-        "jsCode": "\n// Signs EXACTLY the bytes that the next node sends. The body carries only identifiers and the values the approver saw.\nconst crypto = require('crypto');\nconst p = $('Get approval packet').first().json;\nconst f = $input.first().json;\nconst decided = !!f['Decision'];                       // a timed-out wait resumes with no form data\nconst body = {\n  approval_id: p.approval_id, case_id: p.case_id, decision: decided ? f['Decision'] : 'timeout',\n  actor_id: decided ? String(f['Approver ID']).trim() : 'system:n8n-timeout', actor_proof: decided ? String(f['Approver PIN']) : null,\n  case_version: p.case_version, policy_sha256: p.policy_sha256, target_set_sha256: p.target_set_sha256, expires_at: p.expires_at,\n  idempotency_key: [p.approval_id, decided ? f['Decision'] : 'timeout', decided ? String(f['Approver ID']).trim() : 'timeout'].join(':'),\n};\nconst raw = JSON.stringify(body);\nconst ts = String(Math.floor(Date.now() / 1000));\nconst sig = crypto.createHmac('sha256', $env.SENTINEL_HMAC_SECRET).update(ts + '.').update(raw).digest('hex');\nreturn [{ json: { raw, ts, sig } }];\n"
+        "jsCode": "\n// Signs EXACTLY the bytes that the next node sends. The body carries only identifiers and the values the approver saw.\nconst crypto = require('crypto');\nconst p = $('Check packet').first().json;\nconst f = $input.first().json;\nconst decided = !!f['Decision'];                       // a timed-out wait resumes with no form data\nconst body = {\n  approval_id: p.approval_id, case_id: p.case_id, decision: decided ? f['Decision'] : 'timeout',\n  actor_id: decided ? String(f['Approver ID']).trim() : 'system:n8n-timeout', actor_proof: decided ? String(f['Approver PIN']) : null,\n  case_version: p.case_version, policy_sha256: p.policy_sha256, target_set_sha256: p.target_set_sha256, expires_at: p.expires_at,\n  idempotency_key: [p.approval_id, decided ? f['Decision'] : 'timeout', decided ? String(f['Approver ID']).trim() : 'timeout'].join(':'),\n};\nconst raw = JSON.stringify(body);\nconst ts = String(Math.floor(Date.now() / 1000));\nconst sig = crypto.createHmac('sha256', $env.SENTINEL_HMAC_SECRET).update(ts + '.').update(raw).digest('hex');\nreturn [{ json: { raw, ts, sig, decision: body.decision } }];\n"
       }
     },
     {
-      "id": "sentinelApproval001-13",
+      "id": "sentinelApproval001-20",
       "name": "Callback /approve (API)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2200,
+        2600,
         40
       ],
       "parameters": {
@@ -362,12 +509,12 @@
       }
     },
     {
-      "id": "sentinelApproval001-14",
+      "id": "sentinelApproval001-21",
       "name": "Refused (identity)?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        2400,
+        2800,
         40
       ],
       "parameters": {
@@ -381,7 +528,7 @@
           "conditions": [
             {
               "id": "c1",
-              "leftValue": "={{ $json.statusCode === 403 }}",
+              "leftValue": "={{ $json.statusCode === 403 && $node['Build signed callback'].json.decision !== 'timeout' }}",
               "rightValue": "",
               "operator": {
                 "type": "boolean",
@@ -396,20 +543,228 @@
       }
     },
     {
-      "id": "sentinelApproval001-15",
+      "id": "sentinelApproval001-22",
       "name": "Remember refusal",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2600,
+        3000,
         0
       ],
       "parameters": {
-        "jsCode": "return [{ json: { lastError: ($input.first().json.body && $input.first().json.body.error) || 'refused' } }];"
+        "jsCode": "return [{ json: { lastError: String(($input.first().json.body && $input.first().json.body.error) || 'refused') } }];"
       }
+    },
+    {
+      "id": "sentinelApproval001-23",
+      "name": "Check result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3000,
+        120
+      ],
+      "parameters": {
+        "jsCode": "\n// 2xx = recorded; 409 = gate already closed (duplicate click / expired / version changed) - nothing more to do. Anything else is a visible failure.\nconst r = $input.first().json;\nconst code = Number(r.statusCode);\nconst b = r.body && typeof r.body === 'object' ? r.body : {};\nif ((code >= 200 && code < 300) || code === 409) return [{ json: { status_code: code, outcome: String(b.outcome || b.error || '') } }];\nthrow new Error('POST /approve failed with HTTP ' + code + ': ' + JSON.stringify(b).slice(0, 300));\n"
+      }
+    },
+    {
+      "id": "sentinelApproval001-24",
+      "name": "Summarize case",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1900,
+        120
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SENTINEL_API }}/cases/{{ encodeURIComponent($node['Check packet'].json.case_id) }}/summary",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SENTINEL_N8N_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "sentinelApproval001-25",
+      "name": "Approval: Slack on?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2150,
+        120
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ !!$env.SENTINEL_SLACK_WEBHOOK_URL && !!$json.slack_text }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "sentinelApproval001-26",
+      "name": "Approval: Post to Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2350,
+        60
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SENTINEL_SLACK_WEBHOOK_URL }}",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.slack_text }) }}"
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "sentinelApproval001-27",
+      "name": "Approval: Check Slack",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2550,
+        60
+      ],
+      "parameters": {
+        "jsCode": "\n// Slack incoming webhooks answer 200 \"ok\". Temporary trouble (429/5xx/network) is retried; a 4xx is permanent\n// (bad URL / revoked webhook): it is surfaced in the execution but never retried forever.\nconst r = $input.first().json; const c = Number(r.statusCode || 0);\nif (c === 0 || c === 429 || c >= 500) throw new Error('Slack temporary failure HTTP ' + c);\nreturn [{ json: { slack_status: c, slack_ok: c === 200, slack_error: c === 200 ? null : String(r.body || '').slice(0, 120) } }];\n"
+      },
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
+    "Seen before?": {
+      "main": [
+        [
+          {
+            "node": "Check seen",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check seen": {
+      "main": [
+        [
+          {
+            "node": "Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark seen (API)": {
+      "main": [
+        [
+          {
+            "node": "Mark handled",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark handled": {
+      "main": [
+        [
+          {
+            "node": "Respond accepted",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "Approval requested": {
       "main": [
         [
@@ -436,7 +791,7 @@
       "main": [
         [
           {
-            "node": "Duplicate?",
+            "node": "Seen before?",
             "type": "main",
             "index": 0
           }
@@ -461,28 +816,6 @@
         ],
         [
           {
-            "node": "Mark seen",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Mark seen": {
-      "main": [
-        [
-          {
-            "node": "Respond accepted",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Respond accepted": {
-      "main": [
-        [
-          {
             "node": "Get approval packet",
             "type": "main",
             "index": 0
@@ -494,7 +827,32 @@
       "main": [
         [
           {
+            "node": "Check packet",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check packet": {
+      "main": [
+        [
+          {
             "node": "Publish form URL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
             "type": "main",
             "index": 0
           }
@@ -502,6 +860,53 @@
       ]
     },
     "Publish form URL": {
+      "main": [
+        [
+          {
+            "node": "Check published",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check published": {
+      "main": [
+        [
+          {
+            "node": "Mark seen (API)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (outbox will retry)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond accepted": {
+      "main": [
+        [
+          {
+            "node": "Summarize case",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize case": {
       "main": [
         [
           {
@@ -513,6 +918,57 @@
       ]
     },
     "Build form": {
+      "main": [
+        [
+          {
+            "node": "Build Slack approval message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Slack approval message": {
+      "main": [
+        [
+          {
+            "node": "Approval: Slack on?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approval: Slack on?": {
+      "main": [
+        [
+          {
+            "node": "Approval: Post to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait for approver",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approval: Post to Slack": {
+      "main": [
+        [
+          {
+            "node": "Approval: Check Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approval: Check Slack": {
       "main": [
         [
           {
@@ -561,6 +1017,13 @@
         [
           {
             "node": "Remember refusal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check result",
             "type": "main",
             "index": 0
           }
