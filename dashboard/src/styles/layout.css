@@ -32,6 +32,20 @@
 
 .sidebar-brand--no-icon {
   padding-left: 12px;
+  gap: 11px;
+}
+
+.brand-mark {
+  height: 34px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+.brand-mark svg {
+  height: 100%;
+  width: auto;
+  display: block;
 }
 
 .sidebar-brand--no-icon .brand-text h1 {

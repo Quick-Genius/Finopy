@@ -1,4 +1,4 @@
-"""Email notification handler for FinOps alerts and reports."""
+"""Email notification handler for Finopy alerts and reports."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ async def send_anomaly_alert(anomalies: list[dict], to_addresses: list[str]) -> 
         return False
 
     total_excess = sum(a["actual_cost"] - a["expected_cost"] for a in anomalies)
-    subject = f"🚨 FinOps Alert: {len(anomalies)} cost anomalies detected (${total_excess:.2f} excess)"
+    subject = f"🚨 Finopy Alert: {len(anomalies)} cost anomalies detected (${total_excess:.2f} excess)"
 
     rows = ""
     for a in anomalies[:10]:
@@ -70,7 +70,7 @@ async def send_anomaly_alert(anomalies: list[dict], to_addresses: list[str]) -> 
         </tr>"""
 
     body_html = f"""<html><body>
-    <h2>FinOps Cost Anomaly Alert</h2>
+    <h2>Finopy Cost Anomaly Alert</h2>
     <p><strong>{len(anomalies)} anomalies</strong> detected with
     <strong>${total_excess:.2f}</strong> total excess spend.</p>
     <table border="1" cellpadding="8" cellspacing="0">
@@ -90,7 +90,7 @@ async def send_savings_report(
     to_addresses: list[str],
 ) -> bool:
     """Send a weekly savings opportunity report."""
-    subject = f"💰 FinOps Weekly: ${total_savings:.2f}/mo savings identified"
+    subject = f"💰 Finopy Weekly: ${total_savings:.2f}/mo savings identified"
 
     rows = ""
     for r in recommendations[:10]:
@@ -102,7 +102,7 @@ async def send_savings_report(
         </tr>"""
 
     body_html = f"""<html><body>
-    <h2>Weekly FinOps Savings Report</h2>
+    <h2>Weekly Finopy Savings Report</h2>
     <p>Total potential monthly savings: <strong>${total_savings:.2f}</strong></p>
     <table border="1" cellpadding="8" cellspacing="0">
         <tr><th>Recommendation</th><th>Risk</th><th>Savings/mo</th><th>Action</th></tr>

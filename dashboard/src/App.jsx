@@ -30,8 +30,20 @@ export default function App() {
       <div className="app-layout">
         <aside className="sidebar">
           <div className="sidebar-brand sidebar-brand--no-icon">
+            <div className="brand-mark" aria-hidden="true">
+              <svg viewBox="-8 -8 226 368" fill="none" role="img" aria-label="Finopy logo">
+                <g fill="#2B4BC3">
+                  <rect x="52" y="0" width="158" height="64" rx="14" />
+                  <rect x="0" y="96" width="64" height="64" rx="14" />
+                  <rect x="50" y="32" width="64" height="96" />
+                  <rect x="52" y="192" width="158" height="64" rx="14" />
+                  <rect x="0" y="288" width="64" height="64" rx="14" />
+                  <rect x="50" y="224" width="64" height="128" />
+                </g>
+              </svg>
+            </div>
             <div className="brand-text">
-              <h1>FinOps</h1>
+              <h1>Finopy</h1>
               <span>Cost optimizer</span>
             </div>
           </div>

@@ -105,7 +105,7 @@ def generate_demo_analysis(query: str) -> dict:
 
     total_savings = sum(r["estimated_savings_monthly"] for r in recommendations)
 
-    report = f"""## FinOps Agent Report
+    report = f"""## Finopy Agent Report
 
 ### Anomalies Detected: {len(anomalies)}
 - **Amazon EC2** (us-east-1): 68.2% over expected ($4,120.50 vs $2,450.00) — CRITICAL

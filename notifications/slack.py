@@ -29,7 +29,7 @@ async def request_approval(channel: str, recommendation: Recommendation) -> bool
     In production, this would use Slack's Block Kit with action buttons
     and wait for a webhook callback. For now, implements a polling-based approach.
     """
-    message = f"""🔴 *FinOps Approval Required*
+    message = f"""🔴 *Finopy Approval Required*
 
 *Action:* {recommendation['title']}
 *Risk Level:* {recommendation['risk_level'].upper()}

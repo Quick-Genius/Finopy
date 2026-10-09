@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Agentic FinOps Optimizer",
+    title="Finopy",
     description="AI-powered cloud cost optimization with multi-agent orchestration",
     version="1.0.0",
     lifespan=lifespan,
@@ -94,7 +94,7 @@ async def analyze_costs(
     request: QueryRequest,
     db: Session = Depends(get_db),
 ):
-    """Trigger a full FinOps analysis cycle and persist results."""
+    """Trigger a full Finopy analysis cycle and persist results."""
     if _is_demo_mode():
         data = generate_demo_analysis(request.query)
         return AnalysisResponse(
