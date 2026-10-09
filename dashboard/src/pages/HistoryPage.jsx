@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
-import { History, RefreshCw } from 'lucide-react';
+import { RotateCw, ReceiptText } from 'lucide-react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, Scatter, ScatterChart, ZAxis
+  ResponsiveContainer
 } from 'recharts';
 import { getHistory } from '../api/client';
 
@@ -38,14 +38,11 @@ export default function HistoryPage() {
     <div className="animate-fade-in">
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
-          <h2 style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <History size={22} color="var(--accent)" />
-            Agent Run History
-          </h2>
-          <p>Track all past optimization cycles and their outcomes</p>
+          <h2>History</h2>
+          <p>Past runs and savings over time</p>
         </div>
         <button className="btn btn-outline" onClick={fetchHistory}>
-          <RefreshCw size={14} />
+          <RotateCw size={14} strokeWidth={1.8} />
           Refresh
         </button>
       </div>
@@ -61,49 +58,51 @@ export default function HistoryPage() {
       {!loading && runs.length === 0 && (
         <div className="card">
           <div className="empty-state">
-            <History size={48} />
-            <p>No agent runs recorded yet. Run an analysis to populate this view.</p>
+            <ReceiptText size={40} strokeWidth={1.4} />
+            <p>No runs yet. Run an analysis to see history here.</p>
           </div>
         </div>
       )}
 
       {chartData.length > 0 && (
         <div className="chart-container">
-          <h3>Savings Identified Over Time</h3>
+          <h3>Savings over time</h3>
           <ResponsiveContainer width="100%" height={300}>
             <LineChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-              <XAxis dataKey="date" stroke="var(--text-muted)" fontSize={11} />
-              <YAxis stroke="var(--text-muted)" fontSize={11} unit="$" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#ececf1" vertical={false} />
+              <XAxis dataKey="date" stroke="#86868b" fontSize={11} tickLine={false} axisLine={{ stroke: '#e8e8ed' }} />
+              <YAxis stroke="#86868b" fontSize={11} unit="$" tickLine={false} axisLine={false} />
               <Tooltip
                 contentStyle={{
-                  background: 'var(--bg-card)',
-                  border: '1px solid var(--border-color)',
-                  borderRadius: 8,
-                  color: 'var(--text-primary)',
+                  background: '#fff',
+                  border: '1px solid #e8e8ed',
+                  borderRadius: 12,
+                  color: '#1d1d1f',
+                  boxShadow: '0 4px 24px rgba(0,0,0,0.08)',
+                  fontSize: 13,
                 }}
               />
               <Line
                 type="monotone"
                 dataKey="savings"
-                stroke="#34b27b"
+                stroke="#0a7d3b"
                 strokeWidth={2}
-                dot={{ fill: '#34b27b', r: 4 }}
-                activeDot={{ r: 6, fill: '#46c98f' }}
+                dot={{ fill: '#0a7d3b', r: 3, strokeWidth: 0 }}
+                activeDot={{ r: 5, fill: '#0a7d3b', stroke: '#fff', strokeWidth: 2 }}
               />
               <Line
                 type="monotone"
                 dataKey="anomalies"
-                stroke="#d5604f"
-                strokeWidth={1}
+                stroke="#c7c7cc"
+                strokeWidth={1.5}
                 strokeDasharray="4 4"
-                dot={{ fill: '#d5604f', r: 3 }}
+                dot={false}
               />
             </LineChart>
           </ResponsiveContainer>
           <div style={{ display: 'flex', gap: 20, marginTop: 12, fontSize: 12, color: 'var(--text-secondary)' }}>
-            <LegendSwatch color="#34b27b" label="Savings ($)" />
-            <LegendSwatch color="#d5604f" label="Anomalies" />
+            <LegendSwatch color="#0a7d3b" label="Savings ($)" />
+            <LegendSwatch color="#c7c7cc" label="Anomalies" />
           </div>
         </div>
       )}

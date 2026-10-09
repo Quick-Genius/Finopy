@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Send, Sparkles, Lightbulb, MessageSquare } from 'lucide-react';
+import { ArrowUp, Sparkle, Lightbulb } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { askQuestion } from '../api/client';
 
@@ -37,11 +37,8 @@ export default function AskPage() {
   return (
     <div className="animate-fade-in">
       <div className="page-header">
-        <h2 style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <MessageSquare size={22} color="var(--accent)" />
-          Ask About Your Cloud Costs
-        </h2>
-        <p>Get instant AI-powered insights grounded in your actual billing data</p>
+        <h2>Ask about your cloud costs</h2>
+        <p>Answers grounded in your actual billing data</p>
       </div>
 
       <div className="card" style={{ marginBottom: 24 }}>
@@ -55,16 +52,16 @@ export default function AskPage() {
           />
         </div>
         <button className="btn btn-primary" onClick={() => handleAsk()} disabled={loading}>
-          <Send size={16} />
-          {loading ? 'Analyzing...' : 'Ask'}
+          <ArrowUp size={16} strokeWidth={2} />
+          {loading ? 'Analyzing…' : 'Ask'}
         </button>
       </div>
 
       {!answer && !loading && (
         <div className="card">
-          <h3 style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
-            <Lightbulb size={18} color="var(--accent-orange)" />
-            Try asking...
+          <h3 style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, fontSize: 15, fontWeight: 600 }}>
+            <Lightbulb size={17} strokeWidth={1.6} color="#86868b" />
+            Try asking
           </h3>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
             {SUGGESTIONS.map((s) => (
@@ -88,8 +85,8 @@ export default function AskPage() {
       {answer && (
         <div className="card animate-fade-in" style={{ marginTop: 24 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
-            <Sparkles size={18} color="var(--accent)" />
-            <h3>AI Response</h3>
+            <Sparkle size={17} strokeWidth={1.6} color="#86868b" />
+            <h3 style={{ fontSize: 15, fontWeight: 600 }}>Answer</h3>
           </div>
           <div className="report-content"><ReactMarkdown>{answer}</ReactMarkdown></div>
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import random
-import uuid
 from datetime import datetime, timedelta
 
 SERVICES = ["Amazon EC2", "Amazon S3", "Amazon RDS", "AWS Lambda", "Amazon CloudFront", "Amazon EKS"]
@@ -53,7 +52,7 @@ def generate_demo_analysis(query: str) -> dict:
 
     recommendations = [
         {
-            "id": str(uuid.uuid4()),
+            "id": "demo-terminate-idle-ec2",
             "title": "Terminate 3 idle EC2 instances (i-0a1b2c, i-3d4e5f, i-6g7h8i)",
             "description": "These m5.xlarge instances have averaged <3% CPU over 21 days. Terminating saves $432/mo with zero performance impact.",
             "estimated_savings_monthly": 432.00,
@@ -63,7 +62,7 @@ def generate_demo_analysis(query: str) -> dict:
             "approved": None,
         },
         {
-            "id": str(uuid.uuid4()),
+            "id": "demo-rightsize-rds",
             "title": "Rightsize RDS db.r5.2xlarge → db.r5.xlarge",
             "description": "Production RDS instance peaks at 35% CPU. Downsizing to xlarge maintains headroom while cutting costs.",
             "estimated_savings_monthly": 580.00,
@@ -73,7 +72,7 @@ def generate_demo_analysis(query: str) -> dict:
             "approved": None,
         },
         {
-            "id": str(uuid.uuid4()),
+            "id": "demo-ec2-savings-plan",
             "title": "Purchase EC2 Savings Plan for steady-state workloads",
             "description": "12 instances run 24/7. A 1-year No Upfront Compute Savings Plan yields 30% discount.",
             "estimated_savings_monthly": 1240.00,
@@ -83,7 +82,7 @@ def generate_demo_analysis(query: str) -> dict:
             "approved": None,
         },
         {
-            "id": str(uuid.uuid4()),
+            "id": "demo-schedule-dev",
             "title": "Schedule dev/staging EC2 off-hours (nights + weekends)",
             "description": "18 dev instances run 24/7 but are only used during business hours. Scheduling saves 65% on these.",
             "estimated_savings_monthly": 890.00,
@@ -93,7 +92,7 @@ def generate_demo_analysis(query: str) -> dict:
             "approved": None,
         },
         {
-            "id": str(uuid.uuid4()),
+            "id": "demo-delete-ebs",
             "title": "Delete 12 unattached EBS volumes (1.2 TB total)",
             "description": "Orphaned gp3 volumes from terminated instances. No snapshots depend on them.",
             "estimated_savings_monthly": 96.00,

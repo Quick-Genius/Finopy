@@ -29,6 +29,24 @@ class Settings(BaseSettings):
     slack_webhook_url: Optional[str] = None
     slack_approval_channel: str = "#finops-approvals"
 
+    # Email (SMTP)
+    smtp_host: Optional[str] = None
+    smtp_port: int = 587
+    smtp_user: Optional[str] = None
+    smtp_password: Optional[str] = None
+    email_from: str = "finops@example.com"
+
+    # Jira (upcoming)
+    jira_url: Optional[str] = None
+    jira_api_token: Optional[str] = None
+
+    # Telegram (upcoming)
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
+
+    # Azure (upcoming)
+    azure_subscription_id: Optional[str] = None
+
     # Agent Config
     approval_required: bool = True
     max_auto_savings_threshold: float = 100.0  # Auto-approve below this $

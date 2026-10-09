@@ -7,7 +7,9 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        // Override with VITE_API_TARGET=http://127.0.0.1:8001 when the
+        // default API port is taken on your machine.
+        target: process.env.VITE_API_TARGET || 'http://localhost:8000',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
       },

@@ -1,27 +1,43 @@
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+/* Apple / Airbnb light system — SF stack, no webfont, no grid overlay */
 
 :root {
-  --bg-primary: #0e0f11;
-  --bg-secondary: #141517;
-  --bg-card: #16181b;
-  --bg-card-hover: #1b1e22;
-  --text-primary: #e8e9ea;
-  --text-secondary: #9b9ea3;
-  --text-muted: #6c6f75;
-  --accent-blue: #5b8ac0;
-  --accent-purple: #34b27b;
-  --accent-pink: #d5604f;
-  --accent-green: #34b27b;
-  --accent-green-strong: #46c98f;
-  --accent-orange: #d9a441;
-  --accent-red: #d5604f;
-  --accent-cyan: #5b8ac0;
-  --accent: #34b27b;
-  --accent-strong: #46c98f;
-  --border-color: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.14);
-  --radius: 10px;
-  --radius-sm: 8px;
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f5f7;
+  --bg-card: #ffffff;
+  --bg-card-hover: #fafafc;
+  --bg-inset: #f5f5f7;
+
+  --text-primary: #1d1d1f;
+  --text-secondary: #515154;
+  --text-muted: #86868b;
+
+  /* Single primary action — Apple blue. Everything else is neutral. */
+  --accent: #0071e3;
+  --accent-strong: #0068d1;
+  --accent-soft: rgba(0, 113, 227, 0.08);
+
+  /* Semantic — muted, used sparingly for numbers/badges only */
+  --accent-blue: #0071e3;
+  --accent-green: #0a7d3b;
+  --accent-green-strong: #0a7d3b;
+  --accent-green-soft: rgba(10, 125, 59, 0.08);
+  --accent-orange: #9a6700;
+  --accent-orange-soft: rgba(154, 103, 0, 0.08);
+  --accent-red: #d70015;
+  --accent-red-soft: rgba(215, 0, 21, 0.07);
+  --accent-purple: #515154;
+  --accent-pink: #d70015;
+  --accent-cyan: #0071e3;
+
+  --border-color: #e8e8ed;
+  --border-strong: #d2d2d7;
+
+  --radius: 14px;
+  --radius-sm: 10px;
+  --radius-pill: 999px;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 16px rgba(0, 0, 0, 0.05);
+  --shadow-pop: 0 4px 24px rgba(0, 0, 0, 0.08);
 }
 
 * {
@@ -31,64 +47,54 @@
 }
 
 body {
-  font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display',
+    'Helvetica Neue', Helvetica, Arial, sans-serif;
   background: var(--bg-primary);
   color: var(--text-primary);
   min-height: 100vh;
   overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: 'ss01';
 }
 
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background-image:
-    linear-gradient(to right, rgba(255, 255, 255, 0.018) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
-  background-size: 48px 48px;
-  z-index: -1;
-}
+/* No decorative overlay — plain white like Apple/Airbnb */
 
 #root {
   min-height: 100vh;
   display: flex;
 }
 
-/* Scrollbar */
+/* Quiet scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: var(--bg-primary);
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2a2d31;
-  border-radius: 0;
+  background: #d2d2d7;
+  border-radius: 99px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #383c41;
+  background: #aeaeb2;
 }
 
-/* Animations */
+/* Calm, barely-there motion */
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(8px); }
+  from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes slideIn {
-  from { opacity: 0; transform: translateX(-16px); }
+  from { opacity: 0; transform: translateX(-8px); }
   to { opacity: 1; transform: translateX(0); }
 }
 
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.7; }
-}
-
 .animate-fade-in {
-  animation: fadeIn 0.3s ease-out forwards;
+  animation: fadeIn 0.25s ease-out forwards;
 }
 
 .animate-slide-in {
-  animation: slideIn 0.25s ease-out forwards;
+  animation: slideIn 0.2s ease-out forwards;
 }

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { CheckCircle2, XCircle, Clock, Shield } from 'lucide-react';
+import { ShieldCheck } from 'lucide-react';
 import { getRecommendations, approveRecommendation } from '../api/client';
 
 export default function ApprovalsPage() {
@@ -40,11 +40,8 @@ export default function ApprovalsPage() {
   return (
     <div className="animate-fade-in">
       <div className="page-header">
-        <h2 style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <CheckCircle2 size={22} color="var(--accent)" />
-          Approval Queue
-        </h2>
-        <p>Review and approve/reject optimization actions before execution</p>
+        <h2>Approvals</h2>
+        <p>Review actions before anything runs</p>
       </div>
 
       {error && (
@@ -58,8 +55,8 @@ export default function ApprovalsPage() {
       {!loading && recs.length === 0 && (
         <div className="card">
           <div className="empty-state">
-            <Shield size={48} />
-            <p>No pending approvals. The queue is clear.</p>
+            <ShieldCheck size={40} strokeWidth={1.4} />
+            <p>You're all caught up. No pending approvals.</p>
           </div>
         </div>
       )}
@@ -97,19 +94,17 @@ export default function ApprovalsPage() {
               className="btn btn-success"
               onClick={() => handleAction(rec.id, true)}
               disabled={actionLoading === rec.id}
-              style={{ fontSize: 12, padding: '8px 16px' }}
+              style={{ fontSize: 13, padding: '8px 18px' }}
             >
-              <CheckCircle2 size={14} />
               Approve
             </button>
             <button
               className="btn btn-danger"
               onClick={() => handleAction(rec.id, false)}
               disabled={actionLoading === rec.id}
-              style={{ fontSize: 12, padding: '8px 16px' }}
+              style={{ fontSize: 13, padding: '8px 18px' }}
             >
-              <XCircle size={14} />
-              Reject
+              Decline
             </button>
           </div>
         </div>

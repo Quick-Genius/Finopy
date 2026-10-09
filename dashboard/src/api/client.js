@@ -1,6 +1,9 @@
 import axios from 'axios';
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// In dev, requests go to `/api/*` so Vite proxies them to the backend
+// (see vite.config.js `proxy`). Set VITE_API_URL for production builds
+// that serve the frontend separately from the API.
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 const api = axios.create({
   baseURL: API_BASE,
@@ -8,7 +11,7 @@ const api = axios.create({
   headers: { 'Content-Type': 'application/json' },
 });
 
-export const analyzeCoasts = (query) =>
+export const analyzeCosts = (query) =>
   api.post('/analyze', { query });
 
 export const askQuestion = (query) =>
@@ -28,5 +31,8 @@ export const getHealth = () =>
 
 export const getHistory = (limit = 20) =>
   api.get('/history/runs', { params: { limit } });
+
+export const getIntegrations = () =>
+  api.get('/integrations');
 
 export default api;
